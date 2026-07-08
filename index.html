@@ -56,6 +56,9 @@
     <p class="mb-2 text-xs text-gray-500">Cota relativa ao nível do mar em relação ao zero do arquivo.</p>
     <input type="number" id="seaLevel" value="0" step="0.01"
       class="w-full rounded border border-gray-600 bg-[#1e1e1e] px-2 py-1.5 text-sm text-gray-200 focus:border-[#00ACCD] focus:outline-none" />
+    <h2 class="mb-1 mt-3 text-sm font-semibold text-gray-200">Tamanho do texto</h2>
+    <input type="number" id="textSize" value="30" step="1" min="1"
+      class="w-full rounded border border-gray-600 bg-[#1e1e1e] px-2 py-1.5 text-sm text-gray-200 focus:border-[#00ACCD] focus:outline-none" />
   </div>
 
   <!-- ===================== TIPO DE SAÍDA ===================== -->
@@ -129,7 +132,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v11</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v12</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -163,6 +166,7 @@ function saveUiState() {
     outLabel: $('outLabel').checked,
     layer: $('layerSelect').value,
     seaLevel: $('seaLevel').value,
+    textSize: $('textSize').value,
     updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
   };
   localStorage.setItem(UI_STORE, JSON.stringify(state));
@@ -181,6 +185,7 @@ function restoreUiState() {
   if (typeof state.outPopup === 'boolean') $('outPopup').checked = state.outPopup;
   if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
   if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
+  if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
     const radio = document.querySelector(`input[name="updMode"][value="${state.updateMode}"]`);
     if (radio) radio.checked = true;
@@ -318,37 +323,43 @@ async function resolveProps(feature, keys) {
   const p = feature.properties || {};
   const out = {};
 
-  // Altura: raw → _height → levels × floorToFloor
-  const resolveHeight = () => {
-    let h = getProp(feature, 'height');
-    if (h === null && typeof p._height === 'number' && p._height > 0) h = p._height;
-    if (h === null) {
-      const lv = Number(p.levels), ff = Number(p.floorToFloor);
-      if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = Math.round(lv * ff * 100) / 100;
-    }
-    return h;
-  };
-
-  // Altura na base: baseHeight → _baseHeight (0 é valor válido)
+  // Altura (top height): topHeight → _topHeight → baseHeight + (levels × ff)
   const resolveBaseHeight = () => {
     let b = getProp(feature, 'baseHeight');
     if (b === null && typeof p._baseHeight === 'number') b = Math.round(p._baseHeight * 100) / 100;
     return b;
   };
 
+  const resolveTopHeight = () => {
+    let t = getProp(feature, 'topHeight');
+    if (t === null && typeof p._topHeight === 'number') t = Math.round(p._topHeight * 100) / 100;
+    if (t === null) {
+      // fallback: base + altura do corpo (height ou levels × floorToFloor)
+      let h = getProp(feature, 'height');
+      if (h === null && typeof p._height === 'number' && p._height > 0) h = p._height;
+      if (h === null) {
+        const lv = Number(p.levels), ff = Number(p.floorToFloor);
+        if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = lv * ff;
+      }
+      const b = resolveBaseHeight();
+      if (h !== null) t = Math.round((h + (b || 0)) * 100) / 100;
+    }
+    return t;
+  };
+
   const cotaBase = () => parseFloat($('seaLevel').value) || 0;
 
   for (const k of keys) {
     if (k === 'height') {
-      out[k] = resolveHeight();
+      out[k] = resolveTopHeight();                        // Altura = top height
     } else if (k === 'baseHeight') {
       out[k] = resolveBaseHeight();
     } else if (k === 'nivelDaBase') {
       const b = resolveBaseHeight();
       out[k] = b === null ? null : Number((b + cotaBase()).toFixed(2));
     } else if (k === 'nivelDoTopo' || k === 'nivelDoMar') {   // alias v10
-      const h = resolveHeight();
-      out[k] = h === null ? null : Number((h + cotaBase()).toFixed(2));
+      const t = resolveTopHeight();
+      out[k] = t === null ? null : Number((t + cotaBase()).toFixed(2));
     } else if (k === 'area') {
       let a = getProp(feature, 'area');
       if (a === null) {
@@ -521,12 +532,12 @@ async function buildLabelFeatures(features, propKeys) {
             shape: 'square',
             stick: false,
             anchor: 'bottom',
-            textSize: 14,
+            textSize: parseFloat($('textSize').value) || 30,
             shapeSize: 40,
             textColor: '#041178',
             renderMode: 'screen',
             borderColor: '#00ACCD',
-            borderWidth: 2,
+            borderWidth: 3,
             stickHeight: 0,
             backgroundColor: '#FFFFFF',
           },
@@ -680,13 +691,41 @@ async function updatePoints(auto = false, scope = 'all') {
 
     // Recalcula os valores (com fallbacks de calculadas) a partir da origem
     const values = await resolveProps(src, propKeys);
-    const { copiedProps, text: newText } = templateFromValues(values);
+    const { copiedProps } = templateFromValues(values);
+
+    // TEXTO: respeita edições manuais no elemento. Como o texto usa
+    // templates {{get(properties,'kv_X')}}, os VALORES exibidos atualizam
+    // sozinhos quando as chaves kv_ mudam — só reescrevemos o texto se o
+    // CONJUNTO de propriedades mudou. E mesmo aí, preservamos a ordem das
+    // linhas existentes e anexamos as novas ao final.
+    const currentText = pt.properties.marker?.value?.text || '';
+    const requiredKeys = new Set(Object.keys(copiedProps).map((k) => k.replace(/^kv_/, '')));
+    const currentKeys = new Set(
+      [...currentText.matchAll(/kv_([A-Za-z0-9_]+)/g)].map((m) => m[1])
+    );
+    let newText = currentText;
+    const sameKeys =
+      currentKeys.size === requiredKeys.size &&
+      [...requiredKeys].every((k) => currentKeys.has(k));
+    if (!sameKeys) {
+      const keptLines = currentText.split('\n').filter((line) => {
+        const m = line.match(/kv_([A-Za-z0-9_]+)/);
+        return m && requiredKeys.has(m[1]);
+      });
+      const presentKeys = new Set(
+        keptLines.map((l) => l.match(/kv_([A-Za-z0-9_]+)/)[1])
+      );
+      const newLines = [...requiredKeys]
+        .filter((k) => !presentKeys.has(k))
+        .map((k) => `${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
+      newText = [...keptLines, ...newLines].join('\n');
+    }
 
     // DIFF: só atualiza se algo realmente mudou — isso também impede o
     // loop do listener (nossa própria escrita gera diff vazio na volta).
     const valuesChanged = Object.entries(copiedProps)
       .some(([k, v]) => pt.properties[k] !== v);
-    const textChanged = (pt.properties.marker?.value?.text || '') !== newText;
+    const textChanged = newText !== currentText;
     if (!valuesChanged && !textChanged) continue;
 
     // Mantém geometria, layer, usage e estilo ATUAIS do ponto —
@@ -753,6 +792,13 @@ function setupAutoSync() {
   } catch (e) {
     log('Falha ao registrar listener de rawSections: ' + e.message, true);
   }
+
+  // Mudança na cota base também dispara sincronização (Nível da Base/Topo)
+  $('seaLevel').addEventListener('input', () => {
+    if (!$('autoSync').checked) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => updatePoints(true), 800);
+  });
 }
 
 $('btnUpdateAll').onclick = () => updatePoints(false, 'all');
