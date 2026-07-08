@@ -62,6 +62,11 @@
       title="Remove labels criados por este app e fecha o popup">
       Limpar
     </button>
+    <button id="btnInspect"
+      class="rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-700"
+      title="Despeja o JSON raw das properties da seleção no log — use para descobrir as chaves nativas de label">
+      Inspecionar
+    </button>
   </div>
 
   <!-- ===================== LOG ===================== -->
@@ -73,7 +78,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v1</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v2</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -242,7 +247,8 @@ async function applyPopups(features, propKeys) {
     const html = buildPopupHtml(f, propKeys);
     if (!html) continue;
     try {
-      await rpc.invoke('addHtmlPopup', [{ location: c, html }]);
+      // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
+      await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px' }]);
       count++;
     } catch (e) {
       log('addHtmlPopup falhou: ' + e.message, true);
@@ -277,9 +283,15 @@ function buildLabelFeatures(features, propKeys) {
       properties: {
         layerId: 'default',        // obrigatório — sem isso: cleanedSections undefined
         sp_tag: SP_TAG,            // tag para deleção idempotente
-        text: text,                // propriedade nativa de label do Giraffe
+        // --- chaves candidatas de label nativo (v2: conjunto expandido) ---
+        text: text,
+        label: text,               // possível chave real do "Label/Text" da palette
         textSize: 14,
         textColor: '#000000',
+        hideBackground: false,
+        stick: false,
+        onTop: true,
+        anchor: 'middle',
         color: '#FFFFFF',
         name: `kv_annot_${i + 1}`,
       },
@@ -365,6 +377,15 @@ $('btnClear').onclick = async () => {
   try { await rpc.invoke('clearSDKPopup', []); } catch (e) {}
   const n = await deleteTaggedSections();
   log(`Limpeza concluída (${n} label(s) removidos, popup fechado).`);
+};
+
+$('btnInspect').onclick = async () => {
+  const feats = await readSelection();
+  if (!feats.length) { log('Nada selecionado para inspecionar.', true); return; }
+  feats.forEach((f, i) => {
+    log(`--- Feature ${i + 1} (${f.geometry?.type}) properties raw ---`);
+    log(JSON.stringify(f.properties || {}, null, 2));
+  });
 };
 
 /* =========================================================
