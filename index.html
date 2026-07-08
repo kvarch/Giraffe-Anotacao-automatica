@@ -78,7 +78,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v2</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v3</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -249,6 +249,9 @@ async function applyPopups(features, propKeys) {
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
       await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px' }]);
+      log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
+      // Voa até o popup para garantir visibilidade (pode estar fora do enquadramento)
+      try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
     } catch (e) {
       log('addHtmlPopup falhou: ' + e.message, true);
