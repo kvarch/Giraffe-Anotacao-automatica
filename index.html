@@ -38,6 +38,18 @@
     </div>
   </div>
 
+  <!-- ===================== LAYER DE DESTINO ===================== -->
+  <div class="mb-4 rounded-lg border border-gray-700 bg-[#262626] p-3">
+    <div class="mb-2 flex items-center justify-between">
+      <h2 class="text-sm font-semibold text-gray-200">Layer de destino</h2>
+      <button id="btnRefreshLayers" class="text-xs text-gray-500 hover:text-gray-300" title="Recarregar lista de layers">↻ recarregar</button>
+    </div>
+    <select id="layerSelect"
+      class="w-full rounded border border-gray-600 bg-[#1e1e1e] px-2 py-1.5 text-sm text-gray-200 focus:border-[#00ACCD] focus:outline-none">
+      <option value="default">default</option>
+    </select>
+  </div>
+
   <!-- ===================== TIPO DE SAÍDA ===================== -->
   <div class="mb-4 rounded-lg border border-gray-700 bg-[#262626] p-3">
     <h2 class="mb-2 text-sm font-semibold text-gray-200">Tipo de saída</h2>
@@ -57,6 +69,13 @@
       class="kv-bg-accent flex-1 rounded-lg px-4 py-2 text-sm font-semibold text-black transition hover:opacity-80">
       Aplicar Anotações
     </button>
+    <button id="btnUpdate"
+      class="rounded-lg border border-[#00ACCD] px-4 py-2 text-sm font-semibold text-[#00ACCD] transition hover:bg-[#00ACCD] hover:text-black"
+      title="Relê as features de origem e atualiza os valores dos labels, sem mover os pontos">
+      Atualizar Pontos
+    </button>
+  </div>
+  <div class="mb-4 flex gap-2">
     <button id="btnClear"
       class="rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-700"
       title="Remove labels criados por este app e fecha o popup">
@@ -78,7 +97,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v3</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v7</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -122,6 +141,52 @@ DEFAULT_PROPS.forEach((p, i) => {
 function getSelectedPropKeys() {
   return [...propListEl.querySelectorAll('input:checked')].map((el) => el.dataset.prop);
 }
+
+/* =========================================================
+   LAYERS DO PROJETO — popula o dropdown de destino
+   ========================================================= */
+function extractLayerEntries(raw) {
+  let items = [];
+  if (Array.isArray(raw)) items = raw;
+  else if (raw && typeof raw === 'object') items = Object.values(raw);
+  return items
+    .filter((l) => l && (l.id || l.name || typeof l === 'string'))
+    .map((l) => {
+      if (typeof l === 'string') return { id: l, name: l };
+      return { id: l.id || l.name, name: l.name || l.id };
+    });
+}
+
+function populateLayerSelect() {
+  const sel = $('layerSelect');
+  const current = sel.value;
+  const found = new Map();
+
+  // Chaves candidatas — variam entre versões do SDK
+  ['projectLayers', 'layers', 'drawingLayers', 'lensableLayers'].forEach((key) => {
+    try {
+      const entries = extractLayerEntries(giraffeState.get(key));
+      entries.forEach((e) => { if (!found.has(e.id)) found.set(e.id, e); });
+    } catch (e) { /* chave inexistente — ignorar */ }
+  });
+
+  sel.innerHTML = '<option value="default">default</option>';
+  [...found.values()]
+    .filter((e) => e.id !== 'default')
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .forEach((e) => {
+      const opt = document.createElement('option');
+      opt.value = e.id;
+      opt.textContent = e.name;
+      sel.appendChild(opt);
+    });
+
+  // Restaura seleção anterior se ainda existir
+  if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+  log(`Dropdown de layers: ${found.size} layer(s) do projeto + default.`);
+}
+
+$('btnRefreshLayers').onclick = populateLayerSelect;
 
 /* =========================================================
    HELPERS DE GEOMETRIA
@@ -278,24 +343,61 @@ function buildLabelFeatures(features, propKeys) {
   features.forEach((f, i) => {
     const c = centroid(f);
     if (!c) return;
-    const text = buildLabelText(f, propKeys);
-    if (!text) return;
+
+    // Copia os valores das propriedades escolhidas para as properties do
+    // próprio ponto e usa templates {{get(properties,'chave')}} no texto —
+    // assim o label fica dinâmico/editável como os pontos nativos.
+    const copiedProps = {};
+    const templateLines = [];
+    propKeys.forEach((k) => {
+      const v = getProp(f, k);
+      if (v === null) return;
+      copiedProps[k] = v;
+      templateLines.push(`${k}: {{get(properties, '${k}')}}`);
+    });
+    if (!templateLines.length) return;
+
     out.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: c },
       properties: {
-        layerId: 'default',        // obrigatório — sem isso: cleanedSections undefined
-        sp_tag: SP_TAG,            // tag para deleção idempotente
-        // --- chaves candidatas de label nativo (v2: conjunto expandido) ---
-        text: text,
-        label: text,               // possível chave real do "Label/Text" da palette
-        textSize: 14,
-        textColor: '#000000',
-        hideBackground: false,
-        stick: false,
-        onTop: true,
-        anchor: 'middle',
-        color: '#FFFFFF',
+        // --- estrutura nativa do ponto de texto (genericPoint/Pin) ---
+        type: 'genericPoint',
+        usage: 'Pin',
+        // Layer escolhido no dropdown do app (padrão: 'default')
+        // (obrigatório ter layerId — sem ele: cleanedSections undefined)
+        layerId: $('layerSelect').value || 'default',
+        public: true,
+        stackOrder: 0,
+        _visible: true,
+        _baseHeight: 0,
+        _height: 0,
+        _baseElevation: 0,
+        marker: {
+          kind: 'text',
+          value: {
+            text: templateLines.join('\n'),
+            onTop: true,
+            scale: 1,
+            shape: 'square',
+            stick: false,
+            anchor: 'bottom',
+            textSize: 14,
+            shapeSize: 40,
+            textColor: '#041178',
+            renderMode: 'screen',
+            borderColor: '#00ACCD',
+            borderWidth: 2,
+            stickHeight: 0,
+            backgroundColor: '#FFFFFF',
+          },
+        },
+        // --- valores copiados da feature de origem (lidos pelos templates) ---
+        ...copiedProps,
+        // --- controle do app ---
+        sp_tag: SP_TAG,
+        sp_source: f.properties?.id || f.id || null,  // vínculo com a feature de origem
+        sp_props: propKeys,                            // quais propriedades sincronizar
         name: `kv_annot_${i + 1}`,
       },
     });
@@ -382,6 +484,89 @@ $('btnClear').onclick = async () => {
   log(`Limpeza concluída (${n} label(s) removidos, popup fechado).`);
 };
 
+/* =========================================================
+   ATUALIZAR PONTOS — sincroniza valores sem mover geometria
+   ========================================================= */
+function getRawSectionFeatures() {
+  let raw = giraffeState.get('rawSections');
+  let feats = [];
+  if (Array.isArray(raw)) feats = raw;
+  else if (raw?.features) feats = raw.features;
+  else if (raw && typeof raw === 'object') feats = Object.values(raw);
+  return feats.filter(Boolean);
+}
+
+async function updatePoints() {
+  const all = getRawSectionFeatures();
+
+  // Índice de features por id (candidatas a origem)
+  const byId = {};
+  all.forEach((f) => {
+    const id = f.id || f.properties?.id;
+    if (id) byId[id] = f;
+  });
+
+  // Pontos criados por este app
+  const points = all.filter((f) => f?.properties?.sp_tag === SP_TAG);
+  if (!points.length) { log('Nenhum ponto do app encontrado para atualizar.', true); return; }
+
+  const toUpdate = [];
+  let orphans = 0;
+
+  for (const pt of points) {
+    const srcId = pt.properties.sp_source;
+    const propKeys = pt.properties.sp_props || [];
+    const src = srcId ? byId[srcId] : null;
+
+    if (!src) {
+      orphans++;
+      log(`Ponto ${pt.properties.name || pt.id}: origem ${srcId || '?'} não encontrada (órfão).`, true);
+      continue;
+    }
+
+    // Recalcula os valores copiados a partir da origem atual
+    const copiedProps = {};
+    const templateLines = [];
+    propKeys.forEach((k) => {
+      const v = getProp(src, k);
+      if (v === null) return;
+      copiedProps[k] = v;
+      templateLines.push(`${k}: {{get(properties, '${k}')}}`);
+    });
+
+    // Mantém a geometria ATUAL do ponto (posição pode ter sido ajustada
+    // manualmente pelo usuário) — só as properties mudam.
+    const updated = {
+      ...pt,
+      geometry: pt.geometry,
+      properties: {
+        ...pt.properties,
+        ...copiedProps,
+        marker: {
+          ...pt.properties.marker,
+          value: {
+            ...(pt.properties.marker?.value || {}),
+            text: templateLines.join('\n'),
+          },
+        },
+      },
+    };
+    toUpdate.push(updated);
+  }
+
+  if (!toUpdate.length) { log('Nada a atualizar.' + (orphans ? ` (${orphans} órfão(s))` : ''), true); return; }
+
+  try {
+    await rpc.invoke('updateRawSections', [toUpdate]);
+    const layers = [...new Set(toUpdate.map((f) => f.properties.layerId || '?'))].join(', ');
+    log(`${toUpdate.length} ponto(s) atualizado(s) — posições e layers preservados (${layers}).` + (orphans ? ` ${orphans} órfão(s) ignorados.` : ''));
+  } catch (e) {
+    log('updateRawSections falhou: ' + e.message, true);
+  }
+}
+
+$('btnUpdate').onclick = updatePoints;
+
 $('btnInspect').onclick = async () => {
   const feats = await readSelection();
   if (!feats.length) { log('Nada selecionado para inspecionar.', true); return; }
@@ -397,6 +582,7 @@ $('btnInspect').onclick = async () => {
 (async () => {
   log('App carregado. SDK importado via esm.sh.');
   setupSelectionListener();
+  populateLayerSelect();
   const feats = await readSelection();
   updateSelStatus(feats);
 })();
