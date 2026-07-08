@@ -52,8 +52,8 @@
 
   <!-- ===================== NÍVEL DO MAR ===================== -->
   <div class="mb-4 rounded-lg border border-gray-700 bg-[#262626] p-3">
-    <h2 class="mb-1 text-sm font-semibold text-gray-200">Cota base (Nível do Mar)</h2>
-    <p class="mb-2 text-xs text-gray-500">Nível do Mar = Altura do elemento + esta cota (2 casas decimais)</p>
+    <h2 class="mb-1 text-sm font-semibold text-gray-200">Cota base</h2>
+    <p class="mb-2 text-xs text-gray-500">Cota relativa ao nível do mar em relação ao zero do arquivo.</p>
     <input type="number" id="seaLevel" value="0" step="0.01"
       class="w-full rounded border border-gray-600 bg-[#1e1e1e] px-2 py-1.5 text-sm text-gray-200 focus:border-[#00ACCD] focus:outline-none" />
   </div>
@@ -129,7 +129,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v10</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v11</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -140,15 +140,18 @@ import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
 const SP_TAG = 'kv_annot';            // tag para deleção idempotente (padrão Sun Path)
 const UI_STORE = 'kv_annot_ui';       // persistência do estado da interface
 const DEFAULT_PROPS = [
-  { key: 'levels',       label: 'Levels (pavimentos)',    pt: 'Pavimentos' },
-  { key: 'usage',        label: 'Usage (uso)',            pt: 'Uso' },
-  { key: 'area',         label: 'Area (m²)',              pt: 'Área' },
-  { key: 'height',       label: 'Height (m)',             pt: 'Altura' },
-  { key: 'name',         label: 'Name (nome)',            pt: 'Nome' },
-  { key: 'floorToFloor', label: 'Floor to Floor',         pt: 'Piso a Piso' },
-  { key: 'nivelDoMar',   label: 'Nível do Mar (altura + cota base)', pt: 'Nível do Mar' },
+  { key: 'levels',       label: 'Levels (pavimentos)',    pt: 'Pavimentos',    def: true  },
+  { key: 'usage',        label: 'Usage (uso)',            pt: 'Uso',           def: false },
+  { key: 'area',         label: 'Area (m²)',              pt: 'Área',          def: false },
+  { key: 'height',       label: 'Height (m)',             pt: 'Altura',        def: false },
+  { key: 'name',         label: 'Name (nome)',            pt: 'Nome',          def: false },
+  { key: 'floorToFloor', label: 'Floor to Floor',         pt: 'Piso a Piso',   def: true  },
+  { key: 'baseHeight',   label: 'Base Height (altura na base)', pt: 'Altura na Base', def: false },
+  { key: 'nivelDaBase',  label: 'Nível da Base (base + cota)',  pt: 'Nível da Base',  def: false },
+  { key: 'nivelDoTopo',  label: 'Nível do Topo (altura + cota)', pt: 'Nível do Topo', def: false },
 ];
 const PROP_PT = Object.fromEntries(DEFAULT_PROPS.map((p) => [p.key, p.pt]));
+PROP_PT.nivelDoMar = 'Nível do Topo';  // alias — pontos criados na v10 usavam esta chave
 
 /* =========================================================
    PERSISTÊNCIA DO ESTADO DA UI (sobrevive a reload/fechar app)
@@ -203,10 +206,10 @@ $('btnClearLog').onclick = () => (logBox.innerHTML = '');
    UI — checkboxes de propriedades
    ========================================================= */
 const propListEl = $('propList');
-DEFAULT_PROPS.forEach((p, i) => {
+DEFAULT_PROPS.forEach((p) => {
   const label = document.createElement('label');
   label.className = 'flex items-center gap-2';
-  label.innerHTML = `<input type="checkbox" data-prop="${p.key}" ${i < 3 ? 'checked' : ''}/> <span>${p.label}</span>`;
+  label.innerHTML = `<input type="checkbox" data-prop="${p.key}" ${p.def ? 'checked' : ''}/> <span>${p.label}</span>`;
   propListEl.appendChild(label);
 });
 
@@ -326,9 +329,26 @@ async function resolveProps(feature, keys) {
     return h;
   };
 
+  // Altura na base: baseHeight → _baseHeight (0 é valor válido)
+  const resolveBaseHeight = () => {
+    let b = getProp(feature, 'baseHeight');
+    if (b === null && typeof p._baseHeight === 'number') b = Math.round(p._baseHeight * 100) / 100;
+    return b;
+  };
+
+  const cotaBase = () => parseFloat($('seaLevel').value) || 0;
+
   for (const k of keys) {
     if (k === 'height') {
       out[k] = resolveHeight();
+    } else if (k === 'baseHeight') {
+      out[k] = resolveBaseHeight();
+    } else if (k === 'nivelDaBase') {
+      const b = resolveBaseHeight();
+      out[k] = b === null ? null : Number((b + cotaBase()).toFixed(2));
+    } else if (k === 'nivelDoTopo' || k === 'nivelDoMar') {   // alias v10
+      const h = resolveHeight();
+      out[k] = h === null ? null : Number((h + cotaBase()).toFixed(2));
     } else if (k === 'area') {
       let a = getProp(feature, 'area');
       if (a === null) {
@@ -340,10 +360,6 @@ async function resolveProps(feature, keys) {
       out[k] = a;
     } else if (k === 'name') {
       out[k] = getProp(feature, 'name') || getProp(feature, 'usage');
-    } else if (k === 'nivelDoMar') {
-      const h = resolveHeight();
-      const base = parseFloat($('seaLevel').value) || 0;
-      out[k] = h === null ? null : Number((h + base).toFixed(2));
     } else {
       out[k] = getProp(feature, k);
     }
