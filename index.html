@@ -50,6 +50,14 @@
     </select>
   </div>
 
+  <!-- ===================== NÍVEL DO MAR ===================== -->
+  <div class="mb-4 rounded-lg border border-gray-700 bg-[#262626] p-3">
+    <h2 class="mb-1 text-sm font-semibold text-gray-200">Cota base (Nível do Mar)</h2>
+    <p class="mb-2 text-xs text-gray-500">Nível do Mar = Altura do elemento + esta cota (2 casas decimais)</p>
+    <input type="number" id="seaLevel" value="0" step="0.01"
+      class="w-full rounded border border-gray-600 bg-[#1e1e1e] px-2 py-1.5 text-sm text-gray-200 focus:border-[#00ACCD] focus:outline-none" />
+  </div>
+
   <!-- ===================== TIPO DE SAÍDA ===================== -->
   <div class="mb-4 rounded-lg border border-gray-700 bg-[#262626] p-3">
     <h2 class="mb-2 text-sm font-semibold text-gray-200">Tipo de saída</h2>
@@ -67,16 +75,36 @@
     </label>
   </div>
 
+  <!-- ===================== MODO DE ATUALIZAÇÃO ===================== -->
+  <div class="mb-4 rounded-lg border border-gray-700 bg-[#262626] p-3">
+    <h2 class="mb-2 text-sm font-semibold text-gray-200">Ao atualizar, exibir:</h2>
+    <label class="mb-1 flex items-center gap-2 text-sm">
+      <input type="radio" name="updMode" value="original" checked />
+      <span>As propriedades da criação de cada ponto</span>
+    </label>
+    <label class="flex items-center gap-2 text-sm">
+      <input type="radio" name="updMode" value="app" />
+      <span>As propriedades marcadas no app agora</span>
+    </label>
+  </div>
+
   <!-- ===================== AÇÕES ===================== -->
-  <div class="mb-4 flex gap-2">
+  <div class="mb-2 flex gap-2">
     <button id="btnApply"
       class="kv-bg-accent flex-1 rounded-lg px-4 py-2 text-sm font-semibold text-black transition hover:opacity-80">
       Aplicar Anotações
     </button>
-    <button id="btnUpdate"
-      class="rounded-lg border border-[#00ACCD] px-4 py-2 text-sm font-semibold text-[#00ACCD] transition hover:bg-[#00ACCD] hover:text-black"
-      title="Relê as features de origem e atualiza os valores dos labels, sem mover os pontos">
-      Atualizar Pontos
+  </div>
+  <div class="mb-4 flex gap-2">
+    <button id="btnUpdateAll"
+      class="flex-1 rounded-lg border border-[#00ACCD] px-3 py-2 text-sm font-semibold text-[#00ACCD] transition hover:bg-[#00ACCD] hover:text-black"
+      title="Atualiza todos os pontos do app no projeto">
+      Atualizar Todos
+    </button>
+    <button id="btnUpdateSel"
+      class="flex-1 rounded-lg border border-[#00ACCD] px-3 py-2 text-sm font-semibold text-[#00ACCD] transition hover:bg-[#00ACCD] hover:text-black"
+      title="Atualiza apenas os pontos vinculados aos elementos selecionados (ou os próprios pontos selecionados)">
+      Atualizar Selecionados
     </button>
   </div>
   <div class="mb-4 flex gap-2">
@@ -101,7 +129,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v9</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v10</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -110,6 +138,7 @@ import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
    CONSTANTES
    ========================================================= */
 const SP_TAG = 'kv_annot';            // tag para deleção idempotente (padrão Sun Path)
+const UI_STORE = 'kv_annot_ui';       // persistência do estado da interface
 const DEFAULT_PROPS = [
   { key: 'levels',       label: 'Levels (pavimentos)',    pt: 'Pavimentos' },
   { key: 'usage',        label: 'Usage (uso)',            pt: 'Uso' },
@@ -117,8 +146,46 @@ const DEFAULT_PROPS = [
   { key: 'height',       label: 'Height (m)',             pt: 'Altura' },
   { key: 'name',         label: 'Name (nome)',            pt: 'Nome' },
   { key: 'floorToFloor', label: 'Floor to Floor',         pt: 'Piso a Piso' },
+  { key: 'nivelDoMar',   label: 'Nível do Mar (altura + cota base)', pt: 'Nível do Mar' },
 ];
 const PROP_PT = Object.fromEntries(DEFAULT_PROPS.map((p) => [p.key, p.pt]));
+
+/* =========================================================
+   PERSISTÊNCIA DO ESTADO DA UI (sobrevive a reload/fechar app)
+   ========================================================= */
+function saveUiState() {
+  const state = {
+    props: getSelectedPropKeys(),
+    outPopup: $('outPopup').checked,
+    outLabel: $('outLabel').checked,
+    layer: $('layerSelect').value,
+    seaLevel: $('seaLevel').value,
+    updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
+  };
+  localStorage.setItem(UI_STORE, JSON.stringify(state));
+}
+
+function restoreUiState() {
+  let state = null;
+  try { state = JSON.parse(localStorage.getItem(UI_STORE)); } catch (e) {}
+  if (!state) return;
+
+  if (Array.isArray(state.props)) {
+    propListEl.querySelectorAll('input').forEach((el) => {
+      el.checked = state.props.includes(el.dataset.prop);
+    });
+  }
+  if (typeof state.outPopup === 'boolean') $('outPopup').checked = state.outPopup;
+  if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
+  if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
+  if (state.updateMode) {
+    const radio = document.querySelector(`input[name="updMode"][value="${state.updateMode}"]`);
+    if (radio) radio.checked = true;
+  }
+  // Layer é restaurado após populateLayerSelect (a opção precisa existir)
+  window.__kvPendingLayer = state.layer || null;
+  log('Estado da interface restaurado.');
+}
 
 const $ = (id) => document.getElementById(id);
 const logBox = $('log');
@@ -240,6 +307,51 @@ function getProp(feature, key) {
 }
 
 /* =========================================================
+   RESOLVEDOR DE PROPRIEDADES — com fallbacks para calculadas
+   getSelectedFeatures retorna features RAW; area/height/name são
+   propriedades EVALUATED (calculadas pelo engine) e podem faltar.
+   ========================================================= */
+async function resolveProps(feature, keys) {
+  const p = feature.properties || {};
+  const out = {};
+
+  // Altura: raw → _height → levels × floorToFloor
+  const resolveHeight = () => {
+    let h = getProp(feature, 'height');
+    if (h === null && typeof p._height === 'number' && p._height > 0) h = p._height;
+    if (h === null) {
+      const lv = Number(p.levels), ff = Number(p.floorToFloor);
+      if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = Math.round(lv * ff * 100) / 100;
+    }
+    return h;
+  };
+
+  for (const k of keys) {
+    if (k === 'height') {
+      out[k] = resolveHeight();
+    } else if (k === 'area') {
+      let a = getProp(feature, 'area');
+      if (a === null) {
+        try {
+          const r = await rpc.invoke('featureArea', [feature]);
+          if (typeof r === 'number' && isFinite(r)) a = Math.round(r * 100) / 100;
+        } catch (e) { /* featureArea indisponível — segue null */ }
+      }
+      out[k] = a;
+    } else if (k === 'name') {
+      out[k] = getProp(feature, 'name') || getProp(feature, 'usage');
+    } else if (k === 'nivelDoMar') {
+      const h = resolveHeight();
+      const base = parseFloat($('seaLevel').value) || 0;
+      out[k] = h === null ? null : Number((h + base).toFixed(2));
+    } else {
+      out[k] = getProp(feature, k);
+    }
+  }
+  return out;
+}
+
+/* =========================================================
    LEITURA DA SELEÇÃO
    ========================================================= */
 async function readSelection() {
@@ -291,13 +403,12 @@ function setupSelectionListener() {
 /* =========================================================
    POPUP HTML
    ========================================================= */
-function buildPopupHtml(feature, propKeys) {
-  const rows = propKeys
-    .map((k) => {
-      const v = getProp(feature, k);
+function buildPopupHtml(title, values) {
+  const rows = Object.entries(values)
+    .map(([k, v]) => {
       if (v === null) return '';
       return `<tr>
-        <td style="padding:2px 8px 2px 0;color:#00ACCD;font-weight:600;">${k}</td>
+        <td style="padding:2px 8px 2px 0;color:#00ACCD;font-weight:600;">${PROP_PT[k] || k}</td>
         <td style="padding:2px 0;color:#333;">${v}</td>
       </tr>`;
     })
@@ -308,7 +419,7 @@ function buildPopupHtml(feature, propKeys) {
 
   return `<div style="font-family:Hind,sans-serif;font-size:12px;min-width:140px;">
     <div style="font-weight:700;border-bottom:2px solid #00ACCD;margin-bottom:4px;padding-bottom:2px;">
-      ${getProp(feature, 'name') || 'Feature'}
+      ${title || 'Feature'}
     </div>
     <table style="border-collapse:collapse;">${rows}</table>
   </div>`;
@@ -317,18 +428,18 @@ function buildPopupHtml(feature, propKeys) {
 async function applyPopups(features, propKeys) {
   // O SDK mantém apenas um popup SDK ativo por vez; aplicamos no
   // centroide de cada feature em sequência — o último fica visível.
-  // Para 1 feature selecionada (caso mais comum) o comportamento é o esperado.
   let count = 0;
   for (const f of features) {
     const c = centroid(f);
     if (!c) continue;
-    const html = buildPopupHtml(f, propKeys);
+    const values = await resolveProps(f, propKeys);
+    const title = getProp(f, 'name') || getProp(f, 'usage') || 'Feature';
+    const html = buildPopupHtml(title, values);
     if (!html) continue;
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
       await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px' }]);
       log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
-      // Voa até o popup para garantir visibilidade (pode estar fora do enquadramento)
       try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
     } catch (e) {
@@ -341,34 +452,30 @@ async function applyPopups(features, propKeys) {
 /* =========================================================
    LABELS — Points com propriedades nativas de texto
    ========================================================= */
-function buildLabelText(feature, propKeys) {
-  const lines = propKeys
-    .map((k) => {
-      const v = getProp(feature, k);
-      return v === null ? '' : `${k}: ${v}`;
-    })
-    .filter(Boolean);
-  return lines.join('\n');
+function templateFromValues(values) {
+  const copiedProps = {};
+  const templateLines = [];
+  Object.entries(values).forEach(([k, v]) => {
+    if (v === null) return;
+    copiedProps['kv_' + k] = v;
+    templateLines.push(`${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
+  });
+  return { copiedProps, text: templateLines.join('\n') };
 }
 
-function buildLabelFeatures(features, propKeys) {
+async function buildLabelFeatures(features, propKeys) {
   const out = [];
-  features.forEach((f, i) => {
+  const stamp = Date.now();
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
     const c = centroid(f);
-    if (!c) return;
+    if (!c) continue;
 
-    // Copia os valores das propriedades escolhidas para as properties do
-    // próprio ponto usando prefixo kv_ — evita colisão com chaves nativas
-    // (usage, height, levels teriam efeito colateral no engine/no Pin).
-    const copiedProps = {};
-    const templateLines = [];
-    propKeys.forEach((k) => {
-      const v = getProp(f, k);
-      if (v === null) return;
-      copiedProps['kv_' + k] = v;
-      templateLines.push(`${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
-    });
-    if (!templateLines.length) return;
+    // Valores resolvidos (com fallbacks) copiados com prefixo kv_ —
+    // evita colisão com chaves nativas (usage, height, levels).
+    const values = await resolveProps(f, propKeys);
+    const { copiedProps, text } = templateFromValues(values);
+    if (!text) continue;
 
     out.push({
       type: 'Feature',
@@ -392,7 +499,7 @@ function buildLabelFeatures(features, propKeys) {
         marker: {
           kind: 'text',
           value: {
-            text: templateLines.join('\n'),
+            text,
             onTop: true,
             scale: 1,
             shape: 'square',
@@ -412,10 +519,10 @@ function buildLabelFeatures(features, propKeys) {
         sp_tag: SP_TAG,
         sp_source: f.properties?.id || f.id || null,  // vínculo com a feature de origem
         sp_props: propKeys,                            // quais propriedades sincronizar
-        name: `kv_annot_${i + 1}`,
+        name: `kv_annot_${stamp}_${i + 1}`,            // único — não conflita com anteriores
       },
     });
-  });
+  }
   return out;
 }
 
@@ -446,29 +553,22 @@ async function deleteTaggedSections() {
 }
 
 async function applyLabels(features, propKeys) {
-  const labelFeats = buildLabelFeatures(features, propKeys);
+  const labelFeats = await buildLabelFeatures(features, propKeys);
   if (!labelFeats.length) {
     log('Nenhum label a criar (sem propriedades válidas).');
     return;
   }
-  // Ciclo idempotente: deletar antigos → criar novos (padrão Sun Path)
-  await deleteTaggedSections();
+  // NÃO deleta os antigos — múltiplas anotações do mesmo elemento
+  // podem coexistir (ex.: labels com conjuntos de propriedades diferentes).
+  // A limpeza total continua disponível no botão "Limpar".
   try {
+    isSelfWriting = true;
     await rpc.invoke('createRawSections', [labelFeats]);
     log(`${labelFeats.length} label(s) criado(s) via createRawSections.`);
   } catch (e) {
     log('createRawSections falhou: ' + e.message, true);
-    // Fallback: camada temporária (não persiste, mas exibe)
-    try {
-      await rpc.invoke('addTempLayerGeoJSON', [
-        'KV Anotações',
-        { type: 'FeatureCollection', features: labelFeats },
-        { type: 'symbol', layout: { 'text-field': ['get', 'text'], 'text-size': 14 }, paint: { 'text-color': '#000000' } },
-      ]);
-      log('Fallback: labels exibidos em camada temporária "KV Anotações".');
-    } catch (e2) {
-      log('Fallback addTempLayerGeoJSON também falhou: ' + e2.message, true);
-    }
+  } finally {
+    setTimeout(() => { isSelfWriting = false; }, 1000);
   }
 }
 
@@ -510,7 +610,7 @@ function getRawSectionFeatures() {
   return feats.filter(Boolean);
 }
 
-async function updatePoints(auto = false) {
+async function updatePoints(auto = false, scope = 'all') {
   // Lê direto de giraffeState.rawSections — inclui features em layers
   // ocultos (visibilidade é só de renderização, os dados continuam lá).
   const all = getRawSectionFeatures();
@@ -523,18 +623,37 @@ async function updatePoints(auto = false) {
   });
 
   // Pontos criados por este app
-  const points = all.filter((f) => f?.properties?.sp_tag === SP_TAG);
+  let points = all.filter((f) => f?.properties?.sp_tag === SP_TAG);
+
+  // Escopo "selecionados": pontos vinculados aos elementos selecionados
+  // OU os próprios pontos selecionados no mapa
+  if (scope === 'selected') {
+    const sel = await readSelection();
+    const selIds = new Set(sel.map((f) => f.properties?.id || f.id).filter(Boolean));
+    if (!selIds.size) { log('Nada selecionado no mapa.', true); return; }
+    points = points.filter((pt) => {
+      const ptId = pt.id || pt.properties?.id;
+      return selIds.has(pt.properties.sp_source) || selIds.has(ptId);
+    });
+    if (!points.length) { log('Nenhum ponto do app vinculado à seleção atual.', true); return; }
+  }
+
   if (!points.length) {
     if (!auto) log('Nenhum ponto do app encontrado para atualizar.', true);
     return;
   }
+
+  // Modo de propriedades: originais da criação ou as marcadas no app agora
+  const useAppProps =
+    document.querySelector('input[name="updMode"]:checked')?.value === 'app';
+  const appPropKeys = getSelectedPropKeys();
 
   const toUpdate = [];
   let orphans = 0;
 
   for (const pt of points) {
     const srcId = pt.properties.sp_source;
-    const propKeys = pt.properties.sp_props || [];
+    const propKeys = useAppProps ? appPropKeys : (pt.properties.sp_props || []);
     const src = srcId ? byId[srcId] : null;
 
     if (!src) {
@@ -543,16 +662,9 @@ async function updatePoints(auto = false) {
       continue;
     }
 
-    // Recalcula os valores copiados a partir da origem atual (chaves kv_)
-    const copiedProps = {};
-    const templateLines = [];
-    propKeys.forEach((k) => {
-      const v = getProp(src, k);
-      if (v === null) return;
-      copiedProps['kv_' + k] = v;
-      templateLines.push(`${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
-    });
-    const newText = templateLines.join('\n');
+    // Recalcula os valores (com fallbacks de calculadas) a partir da origem
+    const values = await resolveProps(src, propKeys);
+    const { copiedProps, text: newText } = templateFromValues(values);
 
     // DIFF: só atualiza se algo realmente mudou — isso também impede o
     // loop do listener (nossa própria escrita gera diff vazio na volta).
@@ -562,18 +674,19 @@ async function updatePoints(auto = false) {
     if (!valuesChanged && !textChanged) continue;
 
     // Mantém geometria, layer, usage e estilo ATUAIS do ponto —
-    // só as chaves kv_* e o texto do marker são reescritos.
+    // só as chaves kv_*, o texto do marker e (no modo app) sp_props mudam.
     const updated = {
       ...pt,
       geometry: pt.geometry,
       properties: {
         ...pt.properties,
         ...copiedProps,
+        ...(useAppProps ? { sp_props: propKeys } : {}),
         marker: {
           ...pt.properties.marker,
           value: {
             ...(pt.properties.marker?.value || {}),
-            text: templateLines.join('\n'),
+            text: newText,
           },
         },
       },
@@ -626,7 +739,8 @@ function setupAutoSync() {
   }
 }
 
-$('btnUpdate').onclick = () => updatePoints(false);
+$('btnUpdateAll').onclick = () => updatePoints(false, 'all');
+$('btnUpdateSel').onclick = () => updatePoints(false, 'selected');
 
 $('btnInspect').onclick = async () => {
   const feats = await readSelection();
@@ -642,9 +756,19 @@ $('btnInspect').onclick = async () => {
    ========================================================= */
 (async () => {
   log('App carregado. SDK importado via esm.sh.');
+  restoreUiState();
   setupSelectionListener();
   setupAutoSync();
   populateLayerSelect();
+  // Restaura o layer salvo (a opção precisa existir no dropdown)
+  if (window.__kvPendingLayer) {
+    const sel = $('layerSelect');
+    if ([...sel.options].some((o) => o.value === window.__kvPendingLayer)) {
+      sel.value = window.__kvPendingLayer;
+    }
+  }
+  // Persiste qualquer mudança de UI automaticamente
+  document.body.addEventListener('change', saveUiState);
   const feats = await readSelection();
   updateSelStatus(feats);
 })();
