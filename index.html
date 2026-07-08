@@ -19,10 +19,17 @@
 </head>
 <body class="p-4">
 
-  <!-- ===================== CABEÇALHO ===================== -->
+  <!-- ===================== CABEÇALHO KV ===================== -->
   <div class="mb-4">
-    <h1 class="text-lg font-bold kv-accent">Gerador de Anotações</h1>
-    <p class="text-xs text-gray-400">Selecione geometrias no mapa e aplique popups HTML e/ou labels de texto.</p>
+    <div class="flex items-center gap-2.5">
+      <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-sm font-extrabold text-black"
+           style="background: linear-gradient(135deg, #00ACCD, #7fd4e4);">KV</div>
+      <div>
+        <h1 class="text-base font-extrabold leading-tight tracking-tight text-gray-100">Gerador de Anotações</h1>
+        <span class="text-[10px] font-semibold uppercase tracking-wider kv-accent">KV Arquitetos · Giraffe</span>
+      </div>
+    </div>
+    <p class="mt-2 text-xs text-gray-400">Selecione geometrias no mapa e aplique popups HTML e/ou labels de texto.</p>
   </div>
 
   <!-- ===================== STATUS DA SELEÇÃO ===================== -->
@@ -132,7 +139,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v12</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v13</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -419,6 +426,16 @@ function setupSelectionListener() {
       giraffeState.addListener([key], async () => {
         const feats = await readSelection();
         updateSelStatus(feats);
+        // Reexibe popup registrado se o elemento de origem for reselecionado
+        if (feats.length === 1) {
+          const srcId = feats[0].properties?.id || feats[0].id;
+          const saved = srcId ? popupRegistry.get(srcId) : null;
+          if (saved) {
+            try {
+              await rpc.invoke('addHtmlPopup', [saved.html, saved.location, { closeButton: true, maxWidth: '320px' }]);
+            } catch (e) { /* silencioso */ }
+          }
+        }
       });
     } catch (e) {
       // chave inexistente nesta versão — ignorar silenciosamente
@@ -429,7 +446,12 @@ function setupSelectionListener() {
 
 /* =========================================================
    POPUP HTML
+   O popup do SDK é efêmero: some ao desselecionar. Mantemos um
+   registro em memória e reexibimos quando o elemento de origem
+   for selecionado de novo (enquanto o app estiver aberto).
    ========================================================= */
+const popupRegistry = new Map();   // sourceId -> { location, html }
+
 function buildPopupHtml(title, values) {
   const rows = Object.entries(values)
     .map(([k, v]) => {
@@ -466,6 +488,8 @@ async function applyPopups(features, propKeys) {
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
       await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px' }]);
+      const srcId = f.properties?.id || f.id;
+      if (srcId) popupRegistry.set(srcId, { location: c, html });
       log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
       try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
@@ -504,6 +528,10 @@ async function buildLabelFeatures(features, propKeys) {
     const { copiedProps, text } = templateFromValues(values);
     if (!text) continue;
 
+    // Eleva o ponto ao topo do elemento: baseHeight do ponto = topHeight
+    // da origem (coordenada do arquivo, sem a cota base, que é só exibição)
+    const topElev = (await resolveProps(f, ['height'])).height || 0;
+
     out.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: c },
@@ -520,7 +548,8 @@ async function buildLabelFeatures(features, propKeys) {
         public: true,
         stackOrder: 0,
         _visible: true,
-        _baseHeight: 0,
+        baseHeight: topElev,     // rawSections permanentes usam sem underscore
+        _baseHeight: topElev,    // versão com underscore (palette/temp) por segurança
         _height: 0,
         _baseElevation: 0,
         marker: {
