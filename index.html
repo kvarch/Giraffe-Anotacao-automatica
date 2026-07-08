@@ -97,7 +97,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v7</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v8</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -107,13 +107,14 @@ import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
    ========================================================= */
 const SP_TAG = 'kv_annot';            // tag para deleção idempotente (padrão Sun Path)
 const DEFAULT_PROPS = [
-  { key: 'levels',      label: 'Levels (pavimentos)' },
-  { key: 'usage',       label: 'Usage (uso)' },
-  { key: 'area',        label: 'Area (m²)' },
-  { key: 'height',      label: 'Height (m)' },
-  { key: 'name',        label: 'Name (nome)' },
-  { key: 'floorToFloor',label: 'Floor to Floor' },
+  { key: 'levels',       label: 'Levels (pavimentos)',    pt: 'Pavimentos' },
+  { key: 'usage',        label: 'Usage (uso)',            pt: 'Uso' },
+  { key: 'area',         label: 'Area (m²)',              pt: 'Área' },
+  { key: 'height',       label: 'Height (m)',             pt: 'Altura' },
+  { key: 'name',         label: 'Name (nome)',            pt: 'Nome' },
+  { key: 'floorToFloor', label: 'Floor to Floor',         pt: 'Piso a Piso' },
 ];
+const PROP_PT = Object.fromEntries(DEFAULT_PROPS.map((p) => [p.key, p.pt]));
 
 const $ = (id) => document.getElementById(id);
 const logBox = $('log');
@@ -162,7 +163,15 @@ function populateLayerSelect() {
   const current = sel.value;
   const found = new Map();
 
-  // Chaves candidatas — variam entre versões do SDK
+  // Fonte 1 (confiável): layerIds em uso nos rawSections do projeto
+  try {
+    getRawSectionFeatures().forEach((f) => {
+      const lid = f?.properties?.layerId;
+      if (lid && !found.has(lid)) found.set(lid, { id: lid, name: lid });
+    });
+  } catch (e) { /* ignorar */ }
+
+  // Fonte 2: chaves candidatas do giraffeState — variam entre versões do SDK
   ['projectLayers', 'layers', 'drawingLayers', 'lensableLayers'].forEach((key) => {
     try {
       const entries = extractLayerEntries(giraffeState.get(key));
@@ -345,15 +354,15 @@ function buildLabelFeatures(features, propKeys) {
     if (!c) return;
 
     // Copia os valores das propriedades escolhidas para as properties do
-    // próprio ponto e usa templates {{get(properties,'chave')}} no texto —
-    // assim o label fica dinâmico/editável como os pontos nativos.
+    // próprio ponto usando prefixo kv_ — evita colisão com chaves nativas
+    // (usage, height, levels teriam efeito colateral no engine/no Pin).
     const copiedProps = {};
     const templateLines = [];
     propKeys.forEach((k) => {
       const v = getProp(f, k);
       if (v === null) return;
-      copiedProps[k] = v;
-      templateLines.push(`${k}: {{get(properties, '${k}')}}`);
+      copiedProps['kv_' + k] = v;
+      templateLines.push(`${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
     });
     if (!templateLines.length) return;
 
@@ -361,7 +370,10 @@ function buildLabelFeatures(features, propKeys) {
       type: 'Feature',
       geometry: { type: 'Point', coordinates: c },
       properties: {
+        // --- valores copiados da feature de origem (lidos pelos templates) ---
+        ...copiedProps,
         // --- estrutura nativa do ponto de texto (genericPoint/Pin) ---
+        // (depois do spread: nada pode sobrescrever usage/type/layerId)
         type: 'genericPoint',
         usage: 'Pin',
         // Layer escolhido no dropdown do app (padrão: 'default')
@@ -392,8 +404,6 @@ function buildLabelFeatures(features, propKeys) {
             backgroundColor: '#FFFFFF',
           },
         },
-        // --- valores copiados da feature de origem (lidos pelos templates) ---
-        ...copiedProps,
         // --- controle do app ---
         sp_tag: SP_TAG,
         sp_source: f.properties?.id || f.id || null,  // vínculo com a feature de origem
@@ -497,6 +507,8 @@ function getRawSectionFeatures() {
 }
 
 async function updatePoints() {
+  // Lê direto de giraffeState.rawSections — inclui features em layers
+  // ocultos (visibilidade é só de renderização, os dados continuam lá).
   const all = getRawSectionFeatures();
 
   // Índice de features por id (candidatas a origem)
@@ -524,18 +536,18 @@ async function updatePoints() {
       continue;
     }
 
-    // Recalcula os valores copiados a partir da origem atual
+    // Recalcula os valores copiados a partir da origem atual (chaves kv_)
     const copiedProps = {};
     const templateLines = [];
     propKeys.forEach((k) => {
       const v = getProp(src, k);
       if (v === null) return;
-      copiedProps[k] = v;
-      templateLines.push(`${k}: {{get(properties, '${k}')}}`);
+      copiedProps['kv_' + k] = v;
+      templateLines.push(`${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
     });
 
-    // Mantém a geometria ATUAL do ponto (posição pode ter sido ajustada
-    // manualmente pelo usuário) — só as properties mudam.
+    // Mantém geometria, layer, usage e estilo ATUAIS do ponto —
+    // só as chaves kv_* e o texto do marker são reescritos.
     const updated = {
       ...pt,
       geometry: pt.geometry,
