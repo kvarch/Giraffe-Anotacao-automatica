@@ -79,6 +79,10 @@
       <input type="checkbox" id="outLabel" />
       <span>Gerar Label (geometria de texto)</span>
     </label>
+    <label class="mt-1 flex items-center gap-2 text-sm">
+      <input type="checkbox" id="outNivel" />
+      <span>Gerar Rótulo de Nível <span class="text-xs text-gray-500">(símbolo + Nível do Topo)</span></span>
+    </label>
     <label class="mt-2 flex items-center gap-2 border-t border-gray-700 pt-2 text-sm">
       <input type="checkbox" id="autoSync" />
       <span>Sincronização automática <span class="text-xs text-gray-500">(atualiza labels quando a origem mudar)</span></span>
@@ -139,7 +143,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v14</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v15</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -171,6 +175,7 @@ function saveUiState() {
     props: getSelectedPropKeys(),
     outPopup: $('outPopup').checked,
     outLabel: $('outLabel').checked,
+    outNivel: $('outNivel').checked,
     layer: $('layerSelect').value,
     seaLevel: $('seaLevel').value,
     textSize: $('textSize').value,
@@ -191,6 +196,7 @@ function restoreUiState() {
   }
   if (typeof state.outPopup === 'boolean') $('outPopup').checked = state.outPopup;
   if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
+  if (typeof state.outNivel === 'boolean') $('outNivel').checked = state.outNivel;
   if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
   if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
@@ -629,23 +635,114 @@ async function applyLabels(features, propKeys) {
 }
 
 /* =========================================================
+   RÓTULO DE NÍVEL — símbolo arquitetônico (triângulo + haste)
+   Texto e símbolo num ÚNICO SVG: giram e escalam juntos.
+   ========================================================= */
+function fmtBR(v) {
+  return v.toFixed(2).replace('.', ',');
+}
+
+function nivelSvgDataUri(valueText) {
+  const fontSize = 26;
+  const charW = fontSize * 0.58;
+  const textW = Math.ceil(valueText.length * charW);
+  const W = 46 + textW + 10;
+  const H = 64;
+  // Geometria: barra horizontal no topo, texto acima dela, haste vertical
+  // descendo até o vértice do triângulo meio-preenchido (padrão de cota)
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    `<text x="26" y="${fontSize - 4}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" fill="#000">${valueText}</text>` +
+    `<line x1="20" y1="${fontSize + 2}" x2="${W - 4}" y2="${fontSize + 2}" stroke="#000" stroke-width="2"/>` +
+    `<line x1="20" y1="${fontSize + 2}" x2="20" y2="${H - 4}" stroke="#000" stroke-width="2"/>` +
+    `<polygon points="4,${H - 22} 36,${H - 22} 20,${H - 4}" fill="none" stroke="#000" stroke-width="2"/>` +
+    `<polygon points="20,${H - 22} 36,${H - 22} 20,${H - 4}" fill="#000"/>` +
+    `</svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+async function applyNivelLabels(features) {
+  const out = [];
+  const stamp = Date.now();
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
+    const c = centroid(f);
+    if (!c) continue;
+
+    const values = await resolveProps(f, ['nivelDoTopo']);
+    const nv = values.nivelDoTopo;
+    if (nv === null || nv === undefined) continue;
+    const topElev = (await resolveProps(f, ['height'])).height || 0;
+
+    out.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: c },
+      properties: {
+        kv_nivelDoTopo: nv,
+        type: 'genericPoint',
+        usage: 'Pin',
+        layerId: $('layerSelect').value || 'default',
+        public: true,
+        stackOrder: 0,
+        _visible: true,
+        baseHeight: topElev,
+        _baseHeight: topElev,
+        _height: 0,
+        _baseElevation: 0,
+        marker: {
+          kind: 'icon',
+          value: {
+            url: nivelSvgDataUri(fmtBR(nv)),
+            scale: (parseFloat($('textSize').value) || 30) / 30,
+            onTop: true,
+            stick: false,
+            anchor: 'bottom',
+            renderMode: 'screen',
+          },
+        },
+        sp_tag: SP_TAG,
+        sp_kind: 'nivel',
+        sp_source: f.properties?.id || f.id || null,
+        sp_props: ['nivelDoTopo'],
+        name: `kv_nivel_${stamp}_${i + 1}`,
+      },
+    });
+  }
+
+  if (!out.length) {
+    log('Nenhum rótulo de nível a criar (Nível do Topo não resolvido).');
+    return;
+  }
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('createRawSections', [out]);
+    log(`${out.length} rótulo(s) de nível criado(s).`);
+  } catch (e) {
+    log('createRawSections (nível) falhou: ' + e.message, true);
+  } finally {
+    setTimeout(() => { isSelfWriting = false; }, 1000);
+  }
+}
+
+/* =========================================================
    AÇÕES PRINCIPAIS
    ========================================================= */
 $('btnApply').onclick = async () => {
   const propKeys = getSelectedPropKeys();
-  if (!propKeys.length) { log('Selecione ao menos uma propriedade.', true); return; }
-
   const wantPopup = $('outPopup').checked;
   const wantLabel = $('outLabel').checked;
-  if (!wantPopup && !wantLabel) { log('Selecione ao menos um tipo de saída.', true); return; }
+  const wantNivel = $('outNivel').checked;
+  if (!wantPopup && !wantLabel && !wantNivel) { log('Selecione ao menos um tipo de saída.', true); return; }
+  if ((wantPopup || wantLabel) && !propKeys.length) { log('Selecione ao menos uma propriedade.', true); return; }
 
   const feats = await readSelection();
   updateSelStatus(feats);
   if (!feats.length) { log('Nenhuma geometria selecionada no mapa.', true); return; }
 
-  log(`Processando ${feats.length} feature(s) com [${propKeys.join(', ')}]...`);
+  log(`Processando ${feats.length} feature(s)...`);
   if (wantPopup) await applyPopups(feats, propKeys);
   if (wantLabel) await applyLabels(feats, propKeys);
+  if (wantNivel) await applyNivelLabels(feats);
 };
 
 $('btnClear').onclick = async () => {
@@ -715,6 +812,34 @@ async function updatePoints(auto = false, scope = 'all') {
     if (!src) {
       orphans++;
       if (!auto) log(`Ponto ${pt.properties.name || pt.id}: origem ${srcId || '?'} não encontrada (órfão).`, true);
+      continue;
+    }
+
+    // ─── RÓTULO DE NÍVEL: regenera o SVG quando o valor/elevação muda ───
+    if (pt.properties.sp_kind === 'nivel') {
+      const nv = (await resolveProps(src, ['nivelDoTopo'])).nivelDoTopo;
+      const topElevN = (await resolveProps(src, ['height'])).height || 0;
+      const nvChanged = nv !== null && pt.properties.kv_nivelDoTopo !== nv;
+      const elevChangedN =
+        pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
+      if (!nvChanged && !elevChangedN) continue;
+      toUpdate.push({
+        ...pt,
+        geometry: pt.geometry,
+        properties: {
+          ...pt.properties,
+          kv_nivelDoTopo: nv,
+          baseHeight: topElevN,
+          _baseHeight: topElevN,
+          marker: {
+            ...pt.properties.marker,
+            value: {
+              ...(pt.properties.marker?.value || {}),
+              url: nivelSvgDataUri(fmtBR(nv)),
+            },
+          },
+        },
+      });
       continue;
     }
 
