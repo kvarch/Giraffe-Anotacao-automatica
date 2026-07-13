@@ -143,7 +143,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v15</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v16</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -658,7 +658,34 @@ function nivelSvgDataUri(valueText) {
     `<polygon points="4,${H - 22} 36,${H - 22} 20,${H - 4}" fill="none" stroke="#000" stroke-width="2"/>` +
     `<polygon points="20,${H - 22} 36,${H - 22} 20,${H - 4}" fill="#000"/>` +
     `</svg>`;
-  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  return { uri: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg), W, H };
+}
+
+// Rasteriza o SVG em PNG Base64 via canvas — o loader de ícones do Giraffe
+// não aceitou SVG data-URI (ícone quebrado), mas PNG Base64 é aceito
+// (mesmo mecanismo comprovado no fill-pattern do Text on Map).
+const nivelPngCache = new Map();
+function nivelPngDataUri(valueText) {
+  if (nivelPngCache.has(valueText)) {
+    return Promise.resolve(nivelPngCache.get(valueText));
+  }
+  return new Promise((resolve, reject) => {
+    const { uri, W, H } = nivelSvgDataUri(valueText);
+    const img = new Image();
+    const RES = 3; // multiplicador de resolução para nitidez em zoom
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = W * RES;
+      canvas.height = H * RES;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const png = canvas.toDataURL('image/png');
+      nivelPngCache.set(valueText, png);
+      resolve(png);
+    };
+    img.onerror = () => reject(new Error('Falha ao rasterizar SVG do rótulo de nível'));
+    img.src = uri;
+  });
 }
 
 async function applyNivelLabels(features) {
@@ -673,6 +700,14 @@ async function applyNivelLabels(features) {
     const nv = values.nivelDoTopo;
     if (nv === null || nv === undefined) continue;
     const topElev = (await resolveProps(f, ['height'])).height || 0;
+
+    let pngUrl;
+    try {
+      pngUrl = await nivelPngDataUri(fmtBR(nv));
+    } catch (e) {
+      log('Rasterização do símbolo falhou: ' + e.message, true);
+      continue;
+    }
 
     out.push({
       type: 'Feature',
@@ -692,8 +727,9 @@ async function applyNivelLabels(features) {
         marker: {
           kind: 'icon',
           value: {
-            url: nivelSvgDataUri(fmtBR(nv)),
-            scale: (parseFloat($('textSize').value) || 30) / 30,
+            url: pngUrl,
+            // ÷3 compensa o multiplicador de resolução do PNG (RES=3)
+            scale: ((parseFloat($('textSize').value) || 30) / 30) / 3,
             onTop: true,
             stick: false,
             anchor: 'bottom',
@@ -823,6 +859,13 @@ async function updatePoints(auto = false, scope = 'all') {
       const elevChangedN =
         pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
       if (!nvChanged && !elevChangedN) continue;
+      let pngUrlUpd;
+      try {
+        pngUrlUpd = await nivelPngDataUri(fmtBR(nv));
+      } catch (e) {
+        log('Rasterização do símbolo falhou no update: ' + e.message, true);
+        continue;
+      }
       toUpdate.push({
         ...pt,
         geometry: pt.geometry,
@@ -835,7 +878,7 @@ async function updatePoints(auto = false, scope = 'all') {
             ...pt.properties.marker,
             value: {
               ...(pt.properties.marker?.value || {}),
-              url: nivelSvgDataUri(fmtBR(nv)),
+              url: pngUrlUpd,
             },
           },
         },
