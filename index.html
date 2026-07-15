@@ -83,6 +83,12 @@
       <input type="checkbox" id="outNivel" />
       <span>Gerar Rótulo de Nível <span class="text-xs text-gray-500">(símbolo + Nível do Topo)</span></span>
     </label>
+    <div class="mt-2 flex items-center gap-3 border-t border-gray-700 pt-2 text-sm">
+      <span class="text-xs text-gray-400">Símbolo de nível:</span>
+      <label class="flex items-center gap-1"><input type="radio" name="symMode" value="auto" checked /> <span>Auto</span></label>
+      <label class="flex items-center gap-1"><input type="radio" name="symMode" value="2d" /> <span>2D</span></label>
+      <label class="flex items-center gap-1"><input type="radio" name="symMode" value="3d" /> <span>3D</span></label>
+    </div>
     <label class="mt-2 flex items-center gap-2 border-t border-gray-700 pt-2 text-sm">
       <input type="checkbox" id="autoSync" />
       <span>Sincronização automática <span class="text-xs text-gray-500">(atualiza labels quando a origem mudar)</span></span>
@@ -143,7 +149,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v18</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v21</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -180,6 +186,7 @@ function saveUiState() {
     seaLevel: $('seaLevel').value,
     textSize: $('textSize').value,
     updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
+    symMode: symbolModeSetting(),
   };
   localStorage.setItem(UI_STORE, JSON.stringify(state));
 }
@@ -201,6 +208,10 @@ function restoreUiState() {
   if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
     const radio = document.querySelector(`input[name="updMode"][value="${state.updateMode}"]`);
+    if (radio) radio.checked = true;
+  }
+  if (state.symMode) {
+    const radio = document.querySelector(`input[name="symMode"][value="${state.symMode}"]`);
     if (radio) radio.checked = true;
   }
   // Layer é restaurado após populateLayerSelect (a opção precisa existir)
@@ -336,28 +347,29 @@ async function resolveProps(feature, keys) {
   const p = feature.properties || {};
   const out = {};
 
-  // Altura (top height): topHeight → _topHeight → baseHeight + (levels × ff)
+  // Altura na base: _baseHeight (avaliada, inclui stack) → baseHeight (raw)
   const resolveBaseHeight = () => {
-    let b = getProp(feature, 'baseHeight');
-    if (b === null && typeof p._baseHeight === 'number') b = Math.round(p._baseHeight * 100) / 100;
-    return b;
+    if (typeof p._baseHeight === 'number') return Math.round(p._baseHeight * 100) / 100;
+    return getProp(feature, 'baseHeight');
   };
 
+  // Topo (cota absoluta): _height avaliada JÁ inclui base/stack — usar direto.
+  // Fallback raw: base + corpo (height ou levels × floorToFloor)
   const resolveTopHeight = () => {
-    let t = getProp(feature, 'topHeight');
-    if (t === null && typeof p._topHeight === 'number') t = Math.round(p._topHeight * 100) / 100;
-    if (t === null) {
-      // fallback: base + altura do corpo (height ou levels × floorToFloor)
-      let h = getProp(feature, 'height');
-      if (h === null && typeof p._height === 'number' && p._height > 0) h = p._height;
-      if (h === null) {
-        const lv = Number(p.levels), ff = Number(p.floorToFloor);
-        if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = lv * ff;
-      }
-      const b = resolveBaseHeight();
-      if (h !== null) t = Math.round((h + (b || 0)) * 100) / 100;
+    if (typeof p._height === 'number' && p._height > 0) {
+      return Math.round(p._height * 100) / 100;   // avaliada = topo absoluto
     }
-    return t;
+    let t = getProp(feature, 'topHeight');
+    if (t !== null) return t;
+    if (typeof p._topHeight === 'number') return Math.round(p._topHeight * 100) / 100;
+    let h = getProp(feature, 'height');
+    if (h === null) {
+      const lv = Number(p.levels), ff = Number(p.floorToFloor);
+      if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = lv * ff;
+    }
+    if (h === null) return null;
+    const b = resolveBaseHeight() || 0;
+    return Math.round((h + b) * 100) / 100;
   };
 
   const cotaBase = () => parseFloat($('seaLevel').value) || 0;
@@ -643,14 +655,13 @@ function fmtBR(v) {
   return v.toFixed(2).replace('.', ',');
 }
 
-function nivelSvgDataUri(valueText) {
+// Símbolo 3D (elevação): barra + haste + triângulo meio-preenchido
+function nivelSvg3d(valueText) {
   const fontSize = 26;
   const charW = fontSize * 0.58;
   const textW = Math.ceil(valueText.length * charW);
   const W = 46 + textW + 10;
   const H = 64;
-  // Geometria: barra horizontal no topo, texto acima dela, haste vertical
-  // descendo até o vértice do triângulo meio-preenchido (padrão de cota)
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
     `<text x="26" y="${fontSize - 4}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" fill="#000">${valueText}</text>` +
@@ -659,19 +670,48 @@ function nivelSvgDataUri(valueText) {
     `<polygon points="4,${H - 22} 36,${H - 22} 20,${H - 4}" fill="none" stroke="#000" stroke-width="2"/>` +
     `<polygon points="20,${H - 22} 36,${H - 22} 20,${H - 4}" fill="#000"/>` +
     `</svg>`;
-  return { uri: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg), W, H };
+  return { svg, W, H };
+}
+
+// Símbolo 2D (planta): círculo de quadrantes NE/SO com eixos atravessando,
+// texto apoiado sobre a linha horizontal (referência do usuário)
+function nivelSvg2d(valueText) {
+  const fontSize = 26;
+  const charW = fontSize * 0.58;
+  const textW = Math.ceil(valueText.length * charW);
+  const r = 15;
+  const cx = r + 11;            // espaço p/ extensão esquerda do eixo
+  const cy = fontSize + 10;     // texto cabe acima da linha
+  const ext = 8;                // quanto os eixos ultrapassam o círculo
+  const W = cx + r + 10 + textW + 10;
+  const H = cy + r + ext + 3;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    // eixo vertical (atravessa o círculo, ultrapassa acima e abaixo)
+    `<line x1="${cx}" y1="${cy - r - ext}" x2="${cx}" y2="${cy + r + ext}" stroke="#000" stroke-width="1.5"/>` +
+    // eixo horizontal (ultrapassa à esquerda e corre sob o texto à direita)
+    `<line x1="${cx - r - ext}" y1="${cy}" x2="${W - 2}" y2="${cy}" stroke="#000" stroke-width="1.5"/>` +
+    // círculo com quadrantes NE e SO preenchidos
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#fff" stroke="#000" stroke-width="2"/>` +
+    `<path d="M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 0 1 ${cx + r},${cy} Z" fill="#000"/>` +
+    `<path d="M${cx},${cy} L${cx},${cy + r} A${r},${r} 0 0 1 ${cx - r},${cy} Z" fill="#000"/>` +
+    // texto apoiado sobre a linha horizontal
+    `<text x="${cx + r + 10}" y="${cy - 5}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" fill="#000">${valueText}</text>` +
+    `</svg>`;
+  return { svg, W, H };
 }
 
 // Rasteriza o SVG em PNG Base64 via canvas — o loader de ícones do Giraffe
-// não aceitou SVG data-URI (ícone quebrado), mas PNG Base64 é aceito
-// (mesmo mecanismo comprovado no fill-pattern do Text on Map).
+// aceita PNG Base64 em spriteUrl (comprovado na v17).
 const nivelPngCache = new Map();
-function nivelPngDataUri(valueText) {
-  if (nivelPngCache.has(valueText)) {
-    return Promise.resolve(nivelPngCache.get(valueText));
+function nivelPngDataUri(valueText, mode) {
+  const cacheKey = mode + '|' + valueText;
+  if (nivelPngCache.has(cacheKey)) {
+    return Promise.resolve(nivelPngCache.get(cacheKey));
   }
   return new Promise((resolve, reject) => {
-    const { uri, W, H } = nivelSvgDataUri(valueText);
+    const { svg, W, H } = mode === '2d' ? nivelSvg2d(valueText) : nivelSvg3d(valueText);
+    const uri = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
     const img = new Image();
     const RES = 3; // multiplicador de resolução para nitidez em zoom
     img.onload = () => {
@@ -681,11 +721,94 @@ function nivelPngDataUri(valueText) {
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       const png = canvas.toDataURL('image/png');
-      nivelPngCache.set(valueText, png);
+      nivelPngCache.set(cacheKey, png);
       resolve(png);
     };
     img.onerror = () => reject(new Error('Falha ao rasterizar SVG do rótulo de nível'));
     img.src = uri;
+  });
+}
+
+/* =========================================================
+   MODO DE VISTA (2D/3D) — detecção automática + seletor manual
+   ========================================================= */
+let currentViewMode = '3d';   // modo efetivo aplicado aos símbolos
+
+function symbolModeSetting() {
+  return document.querySelector('input[name="symMode"]:checked')?.value || 'auto';
+}
+
+function effectiveMode() {
+  const s = symbolModeSetting();
+  return s === 'auto' ? currentViewMode : s;
+}
+
+// Troca o sprite de todos os rótulos de nível para o modo dado
+async function applyViewModeToNivel(mode) {
+  const all = getRawSectionFeatures();
+  const points = all.filter(
+    (f) => f?.properties?.sp_tag === SP_TAG && f?.properties?.sp_kind === 'nivel'
+  );
+  if (!points.length) return;
+
+  const toUpdate = [];
+  for (const pt of points) {
+    if (pt.properties.sp_view === mode) continue;   // já está no modo certo
+    const nv = pt.properties.kv_nivelDoTopo;
+    if (nv === null || nv === undefined) continue;
+    let png;
+    try { png = await nivelPngDataUri(fmtBR(nv), mode); } catch (e) { continue; }
+    toUpdate.push({
+      ...pt,
+      geometry: pt.geometry,
+      properties: {
+        ...pt.properties,
+        sp_view: mode,
+        marker: {
+          ...pt.properties.marker,
+          value: {
+            ...(pt.properties.marker?.value || {}),
+            spriteUrl: png,
+            // 2D: ponto no centro do círculo; 3D: ponto no vértice do triângulo
+            anchor: mode === '2d' ? 'center' : 'bottom',
+          },
+        },
+      },
+    });
+  }
+  if (!toUpdate.length) return;
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('updateRawSections', [toUpdate]);
+    log(`Símbolos de nível trocados para modo ${mode.toUpperCase()} (${toUpdate.length} rótulo(s)).`);
+  } catch (e) {
+    log('Troca de modo dos símbolos falhou: ' + e.message, true);
+  } finally {
+    setTimeout(() => { isSelfWriting = false; }, 1000);
+  }
+}
+
+// Detecção automática: procura o pitch da câmera em chaves candidatas
+function setupViewModeDetection() {
+  const candidateKeys = ['view', 'activeView', 'camera', 'cameraPosition', 'viewport', 'mapView'];
+  const extractPitch = (v) =>
+    v?.pitch ?? v?.camera?.pitch ?? v?.details?.pitch ?? v?.viewState?.pitch;
+
+  let detected = false;
+  candidateKeys.forEach((key) => {
+    try {
+      giraffeState.addListener([key], () => {
+        const v = giraffeState.get(key);
+        const pitch = extractPitch(v);
+        if (typeof pitch !== 'number') return;
+        if (!detected) { detected = true; log(`Detecção de vista ativa (chave '${key}').`); }
+        const mode = pitch < 5 ? '2d' : '3d';
+        if (mode !== currentViewMode) {
+          currentViewMode = mode;
+          if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
+        }
+      });
+    } catch (e) { /* chave inexistente — ignorar */ }
   });
 }
 
@@ -703,8 +826,9 @@ async function applyNivelLabels(features) {
     const topElev = (await resolveProps(f, ['height'])).height || 0;
 
     let pngUrl;
+    const mode = effectiveMode();
     try {
-      pngUrl = await nivelPngDataUri(fmtBR(nv));
+      pngUrl = await nivelPngDataUri(fmtBR(nv), mode);
     } catch (e) {
       log('Rasterização do símbolo falhou: ' + e.message, true);
       continue;
@@ -736,12 +860,13 @@ async function applyNivelLabels(features) {
             onTop: true,
             stick: false,
             stickHeight: 0,
-            anchor: 'bottom',
+            anchor: mode === '2d' ? 'center' : 'bottom',
             renderMode: 'screen',
           },
         },
         sp_tag: SP_TAG,
         sp_kind: 'nivel',
+        sp_view: mode,
         sp_source: f.properties?.id || f.id || null,
         sp_props: ['nivelDoTopo'],
         name: `kv_nivel_${stamp}_${i + 1}`,
@@ -803,6 +928,34 @@ function getRawSectionFeatures() {
   return feats.filter(Boolean);
 }
 
+// Features AVALIADAS (com _height/_baseHeight calculados pelo engine —
+// essenciais para elementos com stack order). A chave do giraffeState
+// varia/não é documentada, então tentamos candidatas.
+let evalSourceKey = null;
+function getEvaluatedFeaturesMap() {
+  const candidates = ['bakedSections', 'sections', 'evaluatedSections', 'projectSections', 'features'];
+  const map = {};
+  for (const key of candidates) {
+    try {
+      let raw = giraffeState.get(key);
+      let feats = [];
+      if (Array.isArray(raw)) feats = raw;
+      else if (raw?.features) feats = raw.features;
+      else if (raw && typeof raw === 'object') feats = Object.values(raw);
+      feats = feats.filter((f) => f && f.properties);
+      if (feats.length) {
+        evalSourceKey = key;
+        feats.forEach((f) => {
+          const id = f.id || f.properties?.id;
+          if (id) map[id] = f;
+        });
+        return map;
+      }
+    } catch (e) { /* chave inexistente — próxima */ }
+  }
+  return map;
+}
+
 async function updatePoints(auto = false, scope = 'all') {
   // Lê direto de giraffeState.rawSections — inclui features em layers
   // ocultos (visibilidade é só de renderização, os dados continuam lá).
@@ -814,6 +967,23 @@ async function updatePoints(auto = false, scope = 'all') {
     const id = f.id || f.properties?.id;
     if (id) byId[id] = f;
   });
+
+  // Fontes AVALIADAS (com _height/_baseHeight de stack): estado avaliado
+  // do giraffeState (se existir nesta versão) + seleção atual (sempre
+  // avaliada via getSelectedFeatures)
+  const evalMap = getEvaluatedFeaturesMap();
+  const selFeats = await readSelection();
+  const selMap = {};
+  selFeats.forEach((f) => {
+    const id = f.id || f.properties?.id;
+    if (id) selMap[id] = f;
+  });
+  const resolveSrc = (id) => evalMap[id] || selMap[id] || byId[id] || null;
+  if (!auto) {
+    log(evalSourceKey
+      ? `Fonte avaliada: giraffeState '${evalSourceKey}'.`
+      : 'Fonte avaliada indisponível — elementos com stack podem usar valores raw (selecione-os no mapa antes de atualizar para garantir cotas corretas).');
+  }
 
   // Pontos criados por este app
   let points = all.filter((f) => f?.properties?.sp_tag === SP_TAG);
@@ -843,15 +1013,24 @@ async function updatePoints(auto = false, scope = 'all') {
 
   const toUpdate = [];
   let orphans = 0;
+  let skippedStack = 0;
 
   for (const pt of points) {
     const srcId = pt.properties.sp_source;
     const propKeys = useAppProps ? appPropKeys : (pt.properties.sp_props || []);
-    const src = srcId ? byId[srcId] : null;
+    const src = srcId ? resolveSrc(srcId) : null;
+    const srcIsEvaluated = !!(evalMap[srcId] || selMap[srcId]);
 
     if (!src) {
       orphans++;
       if (!auto) log(`Ponto ${pt.properties.name || pt.id}: origem ${srcId || '?'} não encontrada (órfão).`, true);
+      continue;
+    }
+
+    // PROTEÇÃO: elemento com stack order sem fonte avaliada — o recálculo
+    // raw daria cota errada e SOBRESCREVERIA um valor correto. Pular.
+    if (!srcIsEvaluated && src.properties?.stackOrder !== undefined) {
+      skippedStack++;
       continue;
     }
 
@@ -864,8 +1043,9 @@ async function updatePoints(auto = false, scope = 'all') {
         pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
       if (!nvChanged && !elevChangedN) continue;
       let pngUrlUpd;
+      const ptMode = pt.properties.sp_view || '3d';
       try {
-        pngUrlUpd = await nivelPngDataUri(fmtBR(nv));
+        pngUrlUpd = await nivelPngDataUri(fmtBR(nv), ptMode);
       } catch (e) {
         log('Rasterização do símbolo falhou no update: ' + e.message, true);
         continue;
@@ -960,7 +1140,12 @@ async function updatePoints(auto = false, scope = 'all') {
   }
 
   if (!toUpdate.length) {
-    if (!auto) log('Nada a atualizar — valores já estão sincronizados.' + (orphans ? ` (${orphans} órfão(s))` : ''));
+    if (!auto) {
+      let msg = 'Nada a atualizar — valores já estão sincronizados.';
+      if (orphans) msg += ` (${orphans} órfão(s))`;
+      if (skippedStack) msg += ` ${skippedStack} ponto(s) de elementos com stack pulados — selecione esses elementos no mapa e atualize de novo para usar as cotas avaliadas.`;
+      log(msg);
+    }
     return;
   }
 
@@ -968,7 +1153,9 @@ async function updatePoints(auto = false, scope = 'all') {
     isSelfWriting = true;
     await rpc.invoke('updateRawSections', [toUpdate]);
     const layers = [...new Set(toUpdate.map((f) => f.properties.layerId || '?'))].join(', ');
-    log(`${auto ? '[auto] ' : ''}${toUpdate.length} ponto(s) atualizado(s) — posições e layers preservados (${layers}).` + (orphans && !auto ? ` ${orphans} órfão(s) ignorados.` : ''));
+    log(`${auto ? '[auto] ' : ''}${toUpdate.length} ponto(s) atualizado(s) — posições e layers preservados (${layers}).` +
+      (orphans && !auto ? ` ${orphans} órfão(s) ignorados.` : '') +
+      (skippedStack && !auto ? ` ${skippedStack} com stack pulados (sem fonte avaliada — selecione-os e atualize).` : ''));
   } catch (e) {
     log('updateRawSections falhou: ' + e.message, true);
   } finally {
@@ -1031,7 +1218,14 @@ $('btnInspect').onclick = async () => {
   restoreUiState();
   setupSelectionListener();
   setupAutoSync();
+  setupViewModeDetection();
   populateLayerSelect();
+  // Troca manual do modo do símbolo aplica imediatamente aos rótulos
+  document.querySelectorAll('input[name="symMode"]').forEach((r) => {
+    r.addEventListener('change', () => {
+      applyViewModeToNivel(effectiveMode());
+    });
+  });
   // Restaura o layer salvo (a opção precisa existir no dropdown)
   if (window.__kvPendingLayer) {
     const sel = $('layerSelect');
