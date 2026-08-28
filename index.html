@@ -603,7 +603,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V31
+  KV Arquitetos · Gerador de Anotações · Beta V32
 </footer>
 
 <script type="module">
@@ -1224,6 +1224,38 @@ function nivelScale(valueText, mode, baseScale) {
   return base * symScaleFactor(valueText, mode);
 }
 
+// ─── PRESERVAÇÃO DO TAMANHO AJUSTADO À MÃO ───
+// Mesmo princípio do deslocamento manual do rótulo: gravamos em
+// sp_scaleApplied o scale que NÓS escrevemos na última sincronização.
+// Se na próxima passagem o scale do marker estiver diferente disso, quem
+// mudou foi o usuário — então adotamos esse valor como a nova base, em
+// vez de sobrescrevê-lo.
+//
+// A base é guardada já SEM a compensação de quadro, para que o tamanho
+// escolhido continue estável quando o texto ou o modo 2D/3D mudarem.
+function resolveNivelScale(pt, valueText, mode) {
+  const p = pt.properties || {};
+  const applied = p.sp_scaleApplied;
+  const cur = p.marker?.value?.scale;
+  let base = p.sp_scaleBase;
+
+  // Só é possível reconhecer edição manual em pontos que já carregam
+  // sp_scaleApplied (criados/sincronizados a partir da v32). Nos mais
+  // antigos, recalculamos normalmente para corrigir a escala da v30.
+  if (typeof applied === 'number' && typeof cur === 'number' && isFinite(cur) && cur > 0
+      && Math.abs(cur - applied) > 1e-4) {
+    const prevText = fmtBR(typeof p.kv_nivelDoTopo === 'number' ? p.kv_nivelDoTopo : 0);
+    const prevMode = p.sp_view || '3d';
+    const f = symScaleFactor(prevText, prevMode);
+    if (f > 0) base = cur / f;   // desconta a compensação do quadro anterior
+  }
+
+  const scale = nivelScale(valueText, mode, base);
+  return { scale, base: (typeof base === 'number' && isFinite(base) && base > 0)
+    ? base
+    : ((parseFloat($('textSize').value) || 30) / 30) * 2.5 };
+}
+
 // Rasteriza o SVG em PNG Base64 via canvas — o loader de ícones do Giraffe
 // aceita PNG Base64 em spriteUrl (comprovado na v17).
 const nivelPngCache = new Map();
@@ -1281,6 +1313,7 @@ async function applyViewModeToNivel(mode) {
     if (nv === null || nv === undefined) continue;
     let png;
     try { png = await nivelPngDataUri(fmtBR(nv), mode); } catch (e) { continue; }
+    const sc = resolveNivelScale(pt, fmtBR(nv), mode);
     toUpdate.push({
       ...pt,
       geometry: pt.geometry,
@@ -1288,13 +1321,15 @@ async function applyViewModeToNivel(mode) {
         ...pt.properties,
         sp_view: mode,
         sp_sym: SYM_VERSION,
+        sp_scaleBase: sc.base,
+        sp_scaleApplied: sc.scale,
         marker: {
           ...pt.properties.marker,
           value: {
             ...(pt.properties.marker?.value || {}),
             spriteUrl: png,
             // a largura do quadro muda entre 2D e 3D — recompensar a escala
-            scale: nivelScale(fmtBR(nv), mode, pt.properties.sp_scaleBase),
+            scale: sc.scale,
             // 2D: ponto no centro do círculo; 3D: ponto no vértice do triângulo
             anchor: mode === '2d' ? 'center' : 'bottom',
           },
@@ -1603,6 +1638,9 @@ async function applyNivelLabels(features) {
       continue;
     }
 
+    const nivelBaseScale = ((parseFloat($('textSize').value) || 30) / 30) * 2.5;
+    const nivelScaleCreated = nivelScale(fmtBR(nv), mode, nivelBaseScale);
+
     out.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: c },
@@ -1626,7 +1664,7 @@ async function applyNivelLabels(features) {
             spriteSize: 64,                    // tamanho base = altura lógica do desenho
             // fator 2.5 calibrado em teste — tamanho 30 ≙ scale 2.5
             // × compensação do padding do quadro (ver symScaleFactor)
-            scale: nivelScale(fmtBR(nv), mode, ((parseFloat($('textSize').value) || 30) / 30) * 2.5),
+            scale: nivelScaleCreated,
             onTop: true,
             stick: false,
             stickHeight: 0,
@@ -1638,7 +1676,8 @@ async function applyNivelLabels(features) {
         sp_kind: 'nivel',
         sp_view: mode,
         sp_sym: SYM_VERSION,
-        sp_scaleBase: ((parseFloat($('textSize').value) || 30) / 30) * 2.5,
+        sp_scaleBase: nivelBaseScale,
+        sp_scaleApplied: nivelScaleCreated,
         sp_source: f.properties?.id || f.id || null,
         sp_srcAnchor: c,
         sp_props: ['nivelDoTopo'],
@@ -1915,6 +1954,7 @@ async function updatePoints(auto = false, scope = 'all') {
         continue;
       }
       const nvShown = nv !== null ? nv : pt.properties.kv_nivelDoTopo;
+      const scN = resolveNivelScale(pt, fmtBR(nvShown), ptMode);
       toUpdate.push({
         ...pt,
         geometry: followN.geometry,
@@ -1925,14 +1965,16 @@ async function updatePoints(auto = false, scope = 'all') {
           _baseHeight: topElevN,
           sp_srcAnchor: followN.anchor,
           sp_sym: SYM_VERSION,
+          sp_scaleBase: scN.base,
+          sp_scaleApplied: scN.scale,
           marker: {
             ...pt.properties.marker,
             value: {
               ...(pt.properties.marker?.value || {}),
               spriteUrl: pngUrlUpd,
-              // o comprimento do texto altera a largura do quadro —
-              // recompensar para o símbolo não mudar de tamanho
-              scale: nivelScale(fmtBR(nvShown), ptMode, pt.properties.sp_scaleBase),
+              // preserva ajuste manual de tamanho; recompensa a mudança
+              // de largura do quadro (texto mais longo / troca de modo)
+              scale: scN.scale,
               // reafirma a âncora correta para cada modo
               anchor: ptMode === '2d' ? 'center' : 'bottom',
             },
