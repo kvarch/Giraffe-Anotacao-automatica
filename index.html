@@ -603,7 +603,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V29
+  KV Arquitetos · Gerador de Anotações · Beta V30
 </footer>
 
 <script type="module">
@@ -613,6 +613,7 @@ import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
    CONSTANTES
    ========================================================= */
 const SP_TAG = 'kv_annot';            // tag para deleção idempotente (padrão Sun Path)
+const SYM_VERSION = 'v30';            // geometria do símbolo — força regeneração dos rótulos antigos
 const UI_STORE = 'kv_annot_ui';       // persistência do estado da interface
 const DEFAULT_PROPS = [
   { key: 'levels',       label: 'Levels (pavimentos)',    pt: 'Pavimentos',    def: true  },
@@ -1112,35 +1113,69 @@ function fmtBR(v) {
 }
 
 // Símbolo 3D (elevação): barra + haste + triângulo meio-preenchido
+// ─────────────────────────────────────────────────────────────────
+// GEOMETRIA DOS SÍMBOLOS DE NÍVEL
+//
+// O ponto de ancoragem precisa coincidir com o MARCADOR do símbolo
+// (o vértice do triângulo no 3D; o centro do círculo no 2D), e não com
+// o centro do quadro da imagem. Do contrário o rótulo parece deslocado
+// ao ser posicionado ou rotacionado.
+//
+// Em vez de depender de âncoras compostas ('bottom-left'), que o SDK
+// pode não aceitar, os desenhos são montados com PADDING TRANSPARENTE
+// à esquerda, de modo que o marcador caia exatamente onde as âncoras já
+// comprovadamente funcionam:
+//   3D → vértice do triângulo no centro-inferior do quadro  (anchor 'bottom')
+//   2D → centro do círculo no centro do quadro              (anchor 'center')
+//
+// A altura fica travada em 64px nos dois modos, igual ao spriteSize —
+// assim a escala visual permanece idêntica à calibrada na v18.
+// ─────────────────────────────────────────────────────────────────
+
+const SYM_H = 64;          // = spriteSize; não alterar sem recalibrar scale
+const SYM_FONT = 26;
+
+// Símbolo 3D (elevação): barra + haste + triângulo meio-preenchido.
+// Marcador = vértice do triângulo, alinhado ao centro-inferior do quadro.
 function nivelSvg3d(valueText) {
-  const fontSize = 26;
-  const charW = fontSize * 0.58;
+  const charW = SYM_FONT * 0.58;
   const textW = Math.ceil(valueText.length * charW);
-  const W = 46 + textW + 10;
-  const H = 64;
+  const H = SYM_H;
+  const xv = 16;                       // vértice: metade da base do triângulo
+  const yBar = SYM_FONT + 2;           // altura da barra horizontal
+  const triH = 18;                     // altura do triângulo
+  const W0 = 22 + textW + 6;           // largura do conteúdo desenhado
+  const P = Math.max(0, W0 - 2 * xv);  // padding à esquerda p/ centrar o vértice
+  const W = W0 + P;
+  const x = (v) => v + P;              // desloca todo o conteúdo
+  const yv = H - 1;                    // vértice na base do quadro
+
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
-    `<text x="26" y="${fontSize - 4}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" fill="#000">${valueText}</text>` +
-    `<line x1="20" y1="${fontSize + 2}" x2="${W - 4}" y2="${fontSize + 2}" stroke="#000" stroke-width="2"/>` +
-    `<line x1="20" y1="${fontSize + 2}" x2="20" y2="${H - 4}" stroke="#000" stroke-width="2"/>` +
-    `<polygon points="4,${H - 22} 36,${H - 22} 20,${H - 4}" fill="none" stroke="#000" stroke-width="2"/>` +
-    `<polygon points="20,${H - 22} 36,${H - 22} 20,${H - 4}" fill="#000"/>` +
+    `<text x="${x(22)}" y="${SYM_FONT - 4}" font-family="Arial, Helvetica, sans-serif" font-size="${SYM_FONT}" fill="#000">${valueText}</text>` +
+    `<line x1="${x(xv)}" y1="${yBar}" x2="${x(W0)}" y2="${yBar}" stroke="#000" stroke-width="2"/>` +
+    `<line x1="${x(xv)}" y1="${yBar}" x2="${x(xv)}" y2="${yv}" stroke="#000" stroke-width="2"/>` +
+    `<polygon points="${x(0)},${yv - triH} ${x(32)},${yv - triH} ${x(xv)},${yv}" fill="none" stroke="#000" stroke-width="2"/>` +
+    `<polygon points="${x(xv)},${yv - triH} ${x(32)},${yv - triH} ${x(xv)},${yv}" fill="#000"/>` +
     `</svg>`;
   return { svg, W, H };
 }
 
-// Símbolo 2D (planta): círculo de quadrantes NE/SO com eixos atravessando,
-// texto apoiado sobre a linha horizontal (referência do usuário)
+// Símbolo 2D (planta): círculo de quadrantes NE/SO com eixos atravessando.
+// Marcador = centro do círculo, alinhado ao centro do quadro.
 function nivelSvg2d(valueText) {
-  const fontSize = 26;
-  const charW = fontSize * 0.58;
+  const charW = SYM_FONT * 0.58;
   const textW = Math.ceil(valueText.length * charW);
+  const H = SYM_H;
   const r = 15;
-  const cx = r + 11;            // espaço p/ extensão esquerda do eixo
-  const cy = fontSize + 10;     // texto cabe acima da linha
-  const ext = 8;                // quanto os eixos ultrapassam o círculo
-  const W = cx + r + 10 + textW + 10;
-  const H = cy + r + ext + 3;
+  const ext = 8;                       // quanto os eixos ultrapassam o círculo
+  const cy = H / 2;                    // centro vertical do quadro
+  const cx0 = r + ext;                 // centro antes do padding
+  const W0 = cx0 + r + 10 + textW + 6;
+  const P = Math.max(0, W0 - 2 * cx0); // padding à esquerda p/ centrar o círculo
+  const W = W0 + P;
+  const cx = cx0 + P;
+
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
     // eixo vertical (atravessa o círculo, ultrapassa acima e abaixo)
@@ -1152,7 +1187,7 @@ function nivelSvg2d(valueText) {
     `<path d="M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 0 1 ${cx + r},${cy} Z" fill="#000"/>` +
     `<path d="M${cx},${cy} L${cx},${cy + r} A${r},${r} 0 0 1 ${cx - r},${cy} Z" fill="#000"/>` +
     // texto apoiado sobre a linha horizontal
-    `<text x="${cx + r + 10}" y="${cy - 5}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" fill="#000">${valueText}</text>` +
+    `<text x="${cx + r + 10}" y="${cy - 5}" font-family="Arial, Helvetica, sans-serif" font-size="${SYM_FONT}" fill="#000">${valueText}</text>` +
     `</svg>`;
   return { svg, W, H };
 }
@@ -1220,6 +1255,7 @@ async function applyViewModeToNivel(mode) {
       properties: {
         ...pt.properties,
         sp_view: mode,
+        sp_sym: SYM_VERSION,
         marker: {
           ...pt.properties.marker,
           value: {
@@ -1566,6 +1602,7 @@ async function applyNivelLabels(features) {
         sp_tag: SP_TAG,
         sp_kind: 'nivel',
         sp_view: mode,
+        sp_sym: SYM_VERSION,
         sp_source: f.properties?.id || f.id || null,
         sp_srcAnchor: c,
         sp_props: ['nivelDoTopo'],
@@ -1822,18 +1859,21 @@ async function updatePoints(auto = false, scope = 'all') {
       const nvChanged = nv !== null && pt.properties.kv_nivelDoTopo !== nv;
       const elevChangedN =
         pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
+      // Símbolo desenhado por uma versão anterior — regenerar para que o
+      // marcador volte a coincidir com o ponto de ancoragem.
+      const symOutdated = pt.properties.sp_sym !== SYM_VERSION;
 
       // Segue o deslocamento da origem preservando o arraste manual
       const followN = followSource(pt, src);
 
-      if (!nvChanged && !elevChangedN && !followN.geomChanged && !followN.anchorChanged) continue;
+      if (!nvChanged && !elevChangedN && !symOutdated && !followN.geomChanged && !followN.anchorChanged) continue;
 
       let pngUrlUpd;
       const ptMode = pt.properties.sp_view || '3d';
       try {
-        pngUrlUpd = nv !== null
-          ? await nivelPngDataUri(fmtBR(nv), ptMode)
-          : pt.properties.marker?.value?.spriteUrl;  // mantém sprite se nv não mudou
+        pngUrlUpd = (nv !== null || symOutdated)
+          ? await nivelPngDataUri(fmtBR(nv !== null ? nv : pt.properties.kv_nivelDoTopo), ptMode)
+          : pt.properties.marker?.value?.spriteUrl;
       } catch (e) {
         log('Rasterização do símbolo falhou no update: ' + e.message, true);
         continue;
@@ -1847,11 +1887,14 @@ async function updatePoints(auto = false, scope = 'all') {
           baseHeight: topElevN,
           _baseHeight: topElevN,
           sp_srcAnchor: followN.anchor,
+          sp_sym: SYM_VERSION,
           marker: {
             ...pt.properties.marker,
             value: {
               ...(pt.properties.marker?.value || {}),
               spriteUrl: pngUrlUpd,
+              // reafirma a âncora correta para cada modo
+              anchor: ptMode === '2d' ? 'center' : 'bottom',
             },
           },
         },
