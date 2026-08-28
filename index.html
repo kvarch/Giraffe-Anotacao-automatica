@@ -705,7 +705,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V48 · © 2026 Königsberger Vannucchi
+  Beta V49 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -1480,7 +1480,9 @@ async function applyViewModeToNivel(mode) {
   if (!toUpdate.length) return;
   try {
     isSelfWriting = true;
+    const tW = performance.now();
     await rpc.invoke('updateRawSections', [toUpdate]);
+    log(`⏱ troca de símbolo: updateRawSections levou ${(performance.now() - tW).toFixed(0)} ms (${toUpdate.length} rótulo(s))`);
     log(`Símbolos de nível trocados para modo ${mode.toUpperCase()} (${toUpdate.length} rótulo(s)).`);
   } catch (e) {
     log('Troca de modo dos símbolos falhou: ' + e.message, true);
@@ -2226,7 +2228,9 @@ async function updatePoints(auto = false, scope = 'all') {
 
   try {
     isSelfWriting = true;
+    const tW = performance.now();
     await rpc.invoke('updateRawSections', [toUpdate]);
+    if (auto) log(`⏱ updateRawSections levou ${(performance.now() - tW).toFixed(0)} ms (${toUpdate.length} ponto(s))`);
     const layers = [...new Set(toUpdate.map((f) => f.properties.layerId || '?'))].join(', ');
     log(`${auto ? '[auto] ' : ''}${toUpdate.length} ponto(s) atualizado(s) — posições e layers preservados (${layers}).` +
       (orphans && !auto ? ` ${orphans} órfão(s) ignorados.` : '') +
@@ -2256,9 +2260,20 @@ let SYNC_DEBOUNCE = parseInt(localStorage.getItem(SYNC_DELAY_STORE), 10);
 if (!isFinite(SYNC_DEBOUNCE)) SYNC_DEBOUNCE = 220;
 const SELF_WRITE_WINDOW = 900;  // janela do eco da própria escrita
 
+/* ─── CRONOMETRAGEM DA SINCRONIZAÇÃO ───────────────────────────────
+   Mede quanto tempo separa a sua edição da escrita do app, decomposto
+   em: debounce (que o seletor controla) e o trabalho de ida e volta pelo
+   postMessage (leitura da seleção, evaluateFeatures, resolveProps).
+
+   Serve para saber se faz sentido tentar o agrupamento de passos no
+   histórico do Giraffe: se o total for grande, a operação do usuário já
+   fechou muito antes e a ideia não tem chance.                        */
+let syncMark = null;   // { t0, debounce, tRun, tWrite }
+
 // Agenda uma sincronização com debounce curto
 function scheduleSync() {
   clearTimeout(syncTimer);
+  if (!syncMark) syncMark = { t0: performance.now(), debounce: SYNC_DEBOUNCE };
   syncTimer = setTimeout(runSync, SYNC_DEBOUNCE);
 }
 
@@ -2268,12 +2283,23 @@ async function runSync() {
   if (writesPaused()) return;           // diagnóstico: nenhuma escrita automática
   if (syncRunning) { pendingSync = true; return; }
   syncRunning = true;
+  if (syncMark) syncMark.tRun = performance.now();
   try {
     await updatePoints(true);
   } catch (e) {
     log('Auto-sync: ' + e.message, true);
   } finally {
     syncRunning = false;
+    if (syncMark) {
+      const end = performance.now();
+      const espera = (syncMark.tRun - syncMark.t0);
+      const trabalho = (end - syncMark.tRun);
+      const total = (end - syncMark.t0);
+      log(`⏱ evento → escrita: ${total.toFixed(0)} ms `
+        + `(debounce ${syncMark.debounce} ms → esperou ${espera.toFixed(0)} ms; `
+        + `ida e volta do SDK ${trabalho.toFixed(0)} ms)`);
+      syncMark = null;
+    }
     if (pendingSync) { pendingSync = false; scheduleSync(); }
   }
 }
