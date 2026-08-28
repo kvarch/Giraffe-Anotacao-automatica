@@ -149,7 +149,7 @@
     <div id="log" class="log-box max-h-40 overflow-y-auto text-gray-400"></div>
   </div>
 
-  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v21</p>
+  <p class="mt-3 text-center text-[10px] text-gray-600">KV Arquitetos · Anotações v22</p>
 
 <script type="module">
 import { rpc, giraffeState } from 'https://esm.sh/@gi-nx/iframe-sdk';
@@ -788,28 +788,70 @@ async function applyViewModeToNivel(mode) {
   }
 }
 
-// Detecção automática: procura o pitch da câmera em chaves candidatas
+// Detecção automática 2D/3D — Regras:
+// 1. Listeners em chaves candidatas (a chave varia entre versões do SDK)
+// 2. Extrator defensivo do pitch em vários formatos de objeto
+// 3. pitch < 5° = 2D; >= 5° = 3D (estado em currentViewMode)
+// 4. Mudou o modo → applyViewModeToNivel regenera sprites e envia via
+//    updateRawSections (anti-loop: flag isSelfWriting + diff por sp_view)
+// Reforço: polling de fallback — cobre o caso em que a chave existe no
+// estado mas não emite eventos de listener a cada movimento de câmera.
 function setupViewModeDetection() {
-  const candidateKeys = ['view', 'activeView', 'camera', 'cameraPosition', 'viewport', 'mapView'];
-  const extractPitch = (v) =>
-    v?.pitch ?? v?.camera?.pitch ?? v?.details?.pitch ?? v?.viewState?.pitch;
+  const keys = ['camera', 'view', 'viewState', 'mapView', 'cameraPosition', 'viewport', 'activeView'];
 
-  let detected = false;
-  candidateKeys.forEach((key) => {
-    try {
-      giraffeState.addListener([key], () => {
+  const extractPitch = (v) => {
+    if (v == null || typeof v !== 'object') return undefined;
+    return (
+      v.pitch ??
+      v.camera?.pitch ??
+      v.viewState?.pitch ??
+      v.details?.pitch ??
+      v.view?.pitch ??
+      v.map?.pitch
+    );
+  };
+
+  let detectedKey = null;
+
+  const evaluate = (source) => {
+    const tryKeys = detectedKey ? [detectedKey] : keys;
+    for (const key of tryKeys) {
+      try {
         const v = giraffeState.get(key);
         const pitch = extractPitch(v);
-        if (typeof pitch !== 'number') return;
-        if (!detected) { detected = true; log(`Detecção de vista ativa (chave '${key}').`); }
+        if (typeof pitch !== 'number') continue;
+        if (!detectedKey) {
+          detectedKey = key;
+          log(`Detecção de vista ativa — chave '${key}' via ${source}.`);
+        }
         const mode = pitch < 5 ? '2d' : '3d';
         if (mode !== currentViewMode) {
           currentViewMode = mode;
+          log(`Vista: ${mode.toUpperCase()} (pitch ${pitch.toFixed(1)}°).`);
           if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
         }
-      });
-    } catch (e) { /* chave inexistente — ignorar */ }
+        return true;
+      } catch (e) { /* chave inexistente — próxima */ }
+    }
+    return false;
+  };
+
+  // Regra 1: listeners nas chaves candidatas
+  keys.forEach((key) => {
+    try {
+      giraffeState.addListener([key], () => evaluate(`listener '${key}'`));
+    } catch (e) { /* ignorar */ }
   });
+
+  // Fallback por polling (1,5s) — funciona mesmo sem eventos de câmera
+  let warned = false;
+  setInterval(() => {
+    const ok = evaluate('polling');
+    if (!ok && !warned) {
+      warned = true;
+      log('Pitch da câmera não encontrado em nenhuma chave candidata — modo Auto indisponível nesta versão do SDK; use o seletor manual 2D/3D. (Diagnóstico: abra o console F12 e digite console.log(giraffeState) para listarmos as chaves reais.)', true);
+    }
+  }, 1500);
 }
 
 async function applyNivelLabels(features) {
