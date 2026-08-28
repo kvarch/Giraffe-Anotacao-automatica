@@ -600,7 +600,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V25
+  KV Arquitetos · Gerador de Anotações · Beta V26
 </footer>
 
 <script type="module">
@@ -1241,70 +1241,182 @@ async function applyViewModeToNivel(mode) {
   }
 }
 
-// Detecção automática 2D/3D — Regras:
-// 1. Listeners em chaves candidatas (a chave varia entre versões do SDK)
-// 2. Extrator defensivo do pitch em vários formatos de objeto
-// 3. pitch < 5° = 2D; >= 5° = 3D (estado em currentViewMode)
-// 4. Mudou o modo → applyViewModeToNivel regenera sprites e envia via
-//    updateRawSections (anti-loop: flag isSelfWriting + diff por sp_view)
-// Reforço: polling de fallback — cobre o caso em que a chave existe no
-// estado mas não emite eventos de listener a cada movimento de câmera.
-function setupViewModeDetection() {
-  const keys = ['camera', 'view', 'viewState', 'mapView', 'cameraPosition', 'viewport', 'activeView'];
+// ═══════════════════════════════════════════════════════════════════
+// DETECÇÃO AUTOMÁTICA DE VISTA (2D planta / 3D perspectiva)
+//
+// O pitch da câmera NÃO está exposto em nenhuma chave conhecida do
+// giraffeState nesta versão do SDK (confirmado em teste). Por isso a
+// detecção usa três métodos, do mais direto ao mais robusto:
+//
+//   M1. Varredura PROFUNDA do giraffeState — descobre a chave que
+//       contém 'pitch' dinamicamente, sem lista fixa de candidatas.
+//   M2. Geometria da viewport via getMapBounds — em perspectiva o
+//       polígono visível é um TRAPÉZIO (a borda distante é mais larga);
+//       em planta é um RETÂNGULO. A razão entre lados opostos revela
+//       a inclinação sem depender de nenhuma chave interna.
+//   M3. Eventos do mapbox (pitchend/moveend) para reagir na hora,
+//       quando o SDK os repassar.
+//
+// Limiar: razão > 1.12 entre lados opostos = 3D; <= 1.03 = 2D.
+// ═══════════════════════════════════════════════════════════════════
 
-  const extractPitch = (v) => {
-    if (v == null || typeof v !== 'object') return undefined;
-    return (
-      v.pitch ??
-      v.camera?.pitch ??
-      v.viewState?.pitch ??
-      v.details?.pitch ??
-      v.view?.pitch ??
-      v.map?.pitch
-    );
-  };
+// ─── M1: varredura profunda por 'pitch' no estado ───
+const HEAVY_KEYS = new Set(['rawSections', 'bakedSections', 'sections', 'mapContent', 'stackedSections', 'projectSections']);
 
-  let detectedKey = null;
-
-  const evaluate = (source) => {
-    const tryKeys = detectedKey ? [detectedKey] : keys;
-    for (const key of tryKeys) {
-      try {
-        const v = giraffeState.get(key);
-        const pitch = extractPitch(v);
-        if (typeof pitch !== 'number') continue;
-        if (!detectedKey) {
-          detectedKey = key;
-          log(`Detecção de vista ativa — chave '${key}' via ${source}.`);
-        }
-        const mode = pitch < 5 ? '2d' : '3d';
-        if (mode !== currentViewMode) {
-          currentViewMode = mode;
-          log(`Vista: ${mode.toUpperCase()} (pitch ${pitch.toFixed(1)}°).`);
-          if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
-        }
-        return true;
-      } catch (e) { /* chave inexistente — próxima */ }
+function deepFindPitch(v, depth = 0, seen = new Set()) {
+  if (v == null || depth > 4 || typeof v !== 'object') return undefined;
+  if (seen.has(v)) return undefined;
+  seen.add(v);
+  if (typeof v.pitch === 'number' && isFinite(v.pitch)) return v.pitch;
+  if (Array.isArray(v)) {
+    if (v.length > 50) return undefined;      // array grande = dados, não câmera
+    for (const item of v) {
+      const r = deepFindPitch(item, depth + 1, seen);
+      if (typeof r === 'number') return r;
     }
-    return false;
-  };
+    return undefined;
+  }
+  for (const [k, val] of Object.entries(v)) {
+    if (HEAVY_KEYS.has(k)) continue;
+    const r = deepFindPitch(val, depth + 1, seen);
+    if (typeof r === 'number') return r;
+  }
+  return undefined;
+}
 
-  // Regra 1: listeners nas chaves candidatas
-  keys.forEach((key) => {
+// Lista as chaves reais do giraffeState (a API varia entre versões)
+function giraffeStateKeys() {
+  const out = new Set();
+  try {
+    if (typeof giraffeState.getKeys === 'function') {
+      (giraffeState.getKeys() || []).forEach((k) => out.add(k));
+    }
+  } catch (e) { /* ignorar */ }
+  ['state', 'store', '_state', '_store', 'data', 'cache', 'values'].forEach((prop) => {
     try {
-      giraffeState.addListener([key], () => evaluate(`listener '${key}'`));
+      const s = giraffeState[prop];
+      if (!s) return;
+      if (s instanceof Map) [...s.keys()].forEach((k) => out.add(k));
+      else if (typeof s === 'object') Object.keys(s).forEach((k) => out.add(k));
     } catch (e) { /* ignorar */ }
   });
+  // Candidatas conhecidas como reforço
+  ['camera', 'view', 'viewState', 'mapView', 'cameraPosition', 'viewport',
+   'activeView', 'mapCamera', 'mapState', 'projectView'].forEach((k) => out.add(k));
+  return [...out].filter((k) => !HEAVY_KEYS.has(k));
+}
 
-  // Fallback por polling (1,5s) — funciona mesmo sem eventos de câmera
-  let warned = false;
-  setInterval(() => {
-    const ok = evaluate('polling');
-    if (!ok && !warned) {
-      warned = true;
-      log('Pitch da câmera não encontrado em nenhuma chave candidata — modo Auto indisponível nesta versão do SDK; use o seletor manual 2D/3D. (Diagnóstico: abra o console F12 e digite console.log(giraffeState) para listarmos as chaves reais.)', true);
+let pitchKey = null;
+function pitchFromState() {
+  const keys = pitchKey ? [pitchKey] : giraffeStateKeys();
+  for (const key of keys) {
+    try {
+      const p = deepFindPitch(giraffeState.get(key));
+      if (typeof p === 'number') {
+        if (!pitchKey) { pitchKey = key; log(`Detecção de vista: pitch encontrado em giraffeState '${key}'.`); }
+        return p;
+      }
+    } catch (e) { /* chave inexistente */ }
+  }
+  return null;
+}
+
+// ─── M2: geometria da viewport (trapézio = perspectiva) ───
+// Só passa a comandar o modo depois de PROVAR que o polígono retornado
+// é a viewport real (já observou um trapézio). Enquanto não provar, não
+// força 2D — evita falso negativo caso a API devolva apenas um bbox.
+let boundsProven = false;
+
+function ringFromBounds(res) {
+  if (!res) return null;
+  let geom = null;
+  if (res.type === 'FeatureCollection') geom = res.features?.[0]?.geometry;
+  else if (res.type === 'Feature') geom = res.geometry;
+  else if (res.type) geom = res;
+  const coords = geom?.coordinates?.[0];
+  if (!Array.isArray(coords) || coords.length < 4) return null;
+  return coords.slice(0, 4);
+}
+
+function trapezoidRatio(ring) {
+  const lat0 = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  const ky = 110540;
+  const P = ring.map(([lng, lat]) => [lng * kx, lat * ky]);
+  const d = (a, b) => Math.hypot(P[a][0] - P[b][0], P[a][1] - P[b][1]);
+  const s = [d(0, 1), d(1, 2), d(2, 3), d(3, 0)];
+  if (s.some((x) => x < 1e-6)) return null;
+  const r1 = Math.max(s[0], s[2]) / Math.min(s[0], s[2]);
+  const r2 = Math.max(s[1], s[3]) / Math.min(s[1], s[3]);
+  return Math.max(r1, r2);
+}
+
+async function modeFromBounds() {
+  let res;
+  try { res = await rpc.invoke('getMapBounds', []); } catch (e) { return null; }
+  const ring = ringFromBounds(res);
+  if (!ring) return null;
+  const ratio = trapezoidRatio(ring);
+  if (ratio === null) return null;
+  if (ratio > 1.12) {
+    if (!boundsProven) { boundsProven = true; log('Detecção de vista ativa por geometria da viewport.'); }
+    return '3d';
+  }
+  if (ratio <= 1.03 && boundsProven) return '2d';
+  return null;   // zona cinzenta ou método ainda não provado
+}
+
+// ─── Orquestração ───
+function setViewMode(mode, why) {
+  if (!mode || mode === currentViewMode) return;
+  currentViewMode = mode;
+  log(`Vista: ${mode.toUpperCase()} (${why}).`);
+  if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
+}
+
+let evaluating = false;
+async function evaluateViewMode() {
+  if (evaluating) return;
+  evaluating = true;
+  try {
+    const p = pitchFromState();
+    if (typeof p === 'number') {
+      setViewMode(p < 5 ? '2d' : '3d', `pitch ${p.toFixed(1)}°`);
+      return;
     }
-  }, 1500);
+    const m = await modeFromBounds();
+    if (m) setViewMode(m, 'geometria da viewport');
+  } finally {
+    evaluating = false;
+  }
+}
+
+function setupViewModeDetection() {
+  // M3: eventos do mapbox — reação imediata quando disponíveis
+  ['pitchend', 'moveend', 'zoomend'].forEach((ev) => {
+    try { rpc.invoke('addMapboxEventListener', [ev]); } catch (e) { /* ignorar */ }
+  });
+  ['mapboxEvent', 'mapEvent', 'mapContentEvent'].forEach((k) => {
+    try { giraffeState.addListener([k], () => evaluateViewMode()); } catch (e) { /* ignorar */ }
+  });
+
+  // Listener nas chaves de estado que possam carregar a câmera
+  giraffeStateKeys().forEach((key) => {
+    try { giraffeState.addListener([key], () => evaluateViewMode()); } catch (e) { /* ignorar */ }
+  });
+
+  // Polling — só custa RPC quando o modo Auto está ligado e existem
+  // rótulos de nível no projeto para atualizar.
+  setInterval(() => {
+    if (symbolModeSetting() !== 'auto') return;
+    const hasNivel = getRawSectionFeatures().some(
+      (f) => f?.properties?.sp_tag === SP_TAG && f?.properties?.sp_kind === 'nivel'
+    );
+    if (!hasNivel) return;
+    evaluateViewMode();
+  }, 1000);
+
+  evaluateViewMode();
 }
 
 async function applyNivelLabels(features) {
@@ -1833,6 +1945,18 @@ $('btnUpdateAll').onclick = () => updatePoints(false, 'all');
 $('btnUpdateSel').onclick = () => updatePoints(false, 'selected');
 
 $('btnInspect').onclick = async () => {
+  // Diagnóstico da detecção de vista — ajuda a confirmar qual método está ativo
+  try {
+    const p = pitchFromState();
+    let res = null;
+    try { res = await rpc.invoke('getMapBounds', []); } catch (e) {}
+    const ring = ringFromBounds(res);
+    const ratio = ring ? trapezoidRatio(ring) : null;
+    log(`--- Diagnóstico de vista --- modo atual: ${currentViewMode.toUpperCase()} | seletor: ${symbolModeSetting()}`);
+    log(`pitch no estado: ${typeof p === 'number' ? p.toFixed(1) + '°' : 'não encontrado'}${pitchKey ? ` (chave '${pitchKey}')` : ''}`);
+    log(`viewport: ${ring ? `razão ${ratio ? ratio.toFixed(3) : '?'} (>1.12 = 3D, <=1.03 = 2D)` : 'polígono indisponível'} | método provado: ${boundsProven ? 'sim' : 'ainda não'}`);
+  } catch (e) { log('Diagnóstico de vista falhou: ' + e.message, true); }
+
   const feats = await readSelection();
   if (!feats.length) { log('Nada selecionado para inspecionar.', true); return; }
   feats.forEach((f, i) => {
