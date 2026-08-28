@@ -603,7 +603,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V28
+  KV Arquitetos · Gerador de Anotações · Beta V29
 </footer>
 
 <script type="module">
@@ -1370,12 +1370,75 @@ function modeFromFlag() {
   return null;
 }
 
-// ─── M2: geometria da viewport (trapézio = perspectiva) ───
-// Só passa a comandar o modo depois de PROVAR que o polígono retornado
-// é a viewport real (já observou um trapézio). Enquanto não provar, não
-// força 2D — evita falso negativo caso a API devolva apenas um bbox.
-let boundsProven = false;
+// ─── M2: ÁREA NORMALIZADA DA VIEWPORT (método principal) ───
+// Descoberto empiricamente no diagnóstico da v28: giraffeState.mapView
+// traz { bounds, zoom, center }. Ao inclinar a câmera, o zoom e o center
+// NÃO mudam, mas a bbox cresce muito — a câmera passa a enxergar bem mais
+// terreno. Convertendo a bbox para PIXELS (dividindo pela resolução do
+// zoom) obtemos uma medida invariante a zoom e a pan: em planta ela vale
+// exatamente o tamanho do canvas; em perspectiva, um múltiplo dele.
+//
+// Medido no projeto do usuário: planta 342×173 px (59k px²) →
+// perspectiva 467×373 px (174k px²) = 2,95× a área. Amplamente separável.
+//
+// A referência de planta é auto-aprendida (menor área já vista) e pode
+// ser fixada explicitamente pelo usuário ao escolher 2D no seletor.
 
+const PLAN_AREA_STORE = 'kv_annot_plan_area';
+let planAreaPx = parseFloat(localStorage.getItem(PLAN_AREA_STORE)) || null;
+
+// Mede a viewport em pixels equivalentes a partir de giraffeState.mapView.
+// Sem RPC — leitura direta de estado, custo desprezível.
+function viewportMetrics() {
+  let mv;
+  try { mv = giraffeState.get('mapView'); } catch (e) { return null; }
+  if (!mv || typeof mv.zoom !== 'number' || !Array.isArray(mv.bounds)) return null;
+  const b = mv.bounds;
+  // bounds = [[west, south], [east, north]]
+  const west = b[0]?.[0], south = b[0]?.[1], east = b[1]?.[0], north = b[1]?.[1];
+  if (![west, south, east, north].every((n) => typeof n === 'number')) return null;
+
+  const lat0 = (south + north) / 2;
+  const cosLat = Math.cos((lat0 * Math.PI) / 180);
+  const mPerPx = (156543.03392 * cosLat) / Math.pow(2, mv.zoom);
+  if (!isFinite(mPerPx) || mPerPx <= 0) return null;
+
+  const dx = ((east - west) * 111320 * cosLat) / mPerPx;
+  const dy = ((north - south) * 110574) / mPerPx;
+  if (!isFinite(dx) || !isFinite(dy) || dx <= 0 || dy <= 0) return null;
+  return { dx, dy, area: dx * dy };
+}
+
+// Fixa a referência de planta (chamado quando o usuário escolhe 2D manual)
+function calibratePlanArea() {
+  const m = viewportMetrics();
+  if (!m) return;
+  planAreaPx = m.area;
+  localStorage.setItem(PLAN_AREA_STORE, String(planAreaPx));
+  log(`Referência de planta calibrada: ${(planAreaPx / 1000).toFixed(0)}k px².`);
+}
+
+// Limiares com histerese — evita oscilar na zona intermediária
+const R_TO_3D = 1.45;
+const R_TO_2D = 1.25;
+
+function modeFromViewport() {
+  const m = viewportMetrics();
+  if (!m) return null;
+
+  // Auto-aprendizado: a menor área já observada é a vista em planta
+  if (planAreaPx === null || m.area < planAreaPx * 0.98) {
+    planAreaPx = m.area;
+    localStorage.setItem(PLAN_AREA_STORE, String(planAreaPx));
+  }
+
+  const r = m.area / planAreaPx;
+  if (r >= R_TO_3D) return '3d';
+  if (r <= R_TO_2D) return '2d';
+  return null;   // zona morta — mantém o modo atual
+}
+
+// ─── Auxiliares mantidos para o diagnóstico ───
 function ringFromBounds(res) {
   if (!res) return null;
   let geom = null;
@@ -1387,34 +1450,6 @@ function ringFromBounds(res) {
   return coords.slice(0, 4);
 }
 
-function trapezoidRatio(ring) {
-  const lat0 = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180);
-  const ky = 110540;
-  const P = ring.map(([lng, lat]) => [lng * kx, lat * ky]);
-  const d = (a, b) => Math.hypot(P[a][0] - P[b][0], P[a][1] - P[b][1]);
-  const s = [d(0, 1), d(1, 2), d(2, 3), d(3, 0)];
-  if (s.some((x) => x < 1e-6)) return null;
-  const r1 = Math.max(s[0], s[2]) / Math.min(s[0], s[2]);
-  const r2 = Math.max(s[1], s[3]) / Math.min(s[1], s[3]);
-  return Math.max(r1, r2);
-}
-
-async function modeFromBounds() {
-  let res;
-  try { res = await rpc.invoke('getMapBounds', []); } catch (e) { return null; }
-  const ring = ringFromBounds(res);
-  if (!ring) return null;
-  const ratio = trapezoidRatio(ring);
-  if (ratio === null) return null;
-  if (ratio > 1.12) {
-    if (!boundsProven) { boundsProven = true; log('Detecção de vista ativa por geometria da viewport.'); }
-    return '3d';
-  }
-  if (ratio <= 1.03 && boundsProven) return '2d';
-  return null;   // zona cinzenta ou método ainda não provado
-}
-
 // ─── Orquestração ───
 function setViewMode(mode, why) {
   if (!mode || mode === currentViewMode) return;
@@ -1424,51 +1459,54 @@ function setViewMode(mode, why) {
 }
 
 let evaluating = false;
-async function evaluateViewMode() {
+function evaluateViewMode() {
   if (evaluating) return;
   evaluating = true;
   try {
+    // M1: pitch direto, se alguma versão do SDK expuser
     const p = pitchFromState();
     if (typeof p === 'number') {
       setViewMode(p < 5 ? '2d' : '3d', `pitch ${p.toFixed(1)}°`);
       return;
     }
+    // M1b: flag booleana de modo
     const flagMode = modeFromFlag();
     if (flagMode) {
       setViewMode(flagMode, 'flag de modo do Giraffe');
       return;
     }
-    const m = await modeFromBounds();
-    if (m) setViewMode(m, 'geometria da viewport');
+    // M2: área normalizada da viewport (método efetivo nesta versão)
+    const m = modeFromViewport();
+    if (m) {
+      const vm = viewportMetrics();
+      const ratio = vm && planAreaPx ? (vm.area / planAreaPx).toFixed(2) : '?';
+      setViewMode(m, `viewport ${ratio}× a planta`);
+    }
   } finally {
     evaluating = false;
   }
 }
 
 function setupViewModeDetection() {
-  // M3: eventos do mapbox — reação imediata quando disponíveis
-  ['pitchend', 'moveend', 'zoomend'].forEach((ev) => {
-    try { rpc.invoke('addMapboxEventListener', [ev]); } catch (e) { /* ignorar */ }
-  });
-  ['mapboxEvent', 'mapEvent', 'mapContentEvent'].forEach((k) => {
-    try { giraffeState.addListener([k], () => evaluateViewMode()); } catch (e) { /* ignorar */ }
-  });
+  // mapView muda a cada movimento de câmera — reação imediata, sem polling
+  try {
+    giraffeState.addListener(['mapView'], () => evaluateViewMode());
+    log('Detecção de vista ativa (giraffeState.mapView).');
+  } catch (e) {
+    log('Falha ao registrar listener de mapView: ' + e.message, true);
+  }
 
-  // Listener nas chaves de estado que possam carregar a câmera
-  giraffeStateKeys().forEach((key) => {
+  // Reforço: chaves alternativas, caso alguma versão exponha a câmera
+  ['camera', 'viewState', 'mapCamera', 'mapState'].forEach((key) => {
     try { giraffeState.addListener([key], () => evaluateViewMode()); } catch (e) { /* ignorar */ }
   });
 
-  // Polling — só custa RPC quando o modo Auto está ligado e existem
-  // rótulos de nível no projeto para atualizar.
+  // Rede de segurança: se o listener não disparar em alguma versão,
+  // uma verificação leve (leitura de estado, sem RPC) cobre o caso.
   setInterval(() => {
     if (symbolModeSetting() !== 'auto') return;
-    const hasNivel = getRawSectionFeatures().some(
-      (f) => f?.properties?.sp_tag === SP_TAG && f?.properties?.sp_kind === 'nivel'
-    );
-    if (!hasNivel) return;
     evaluateViewMode();
-  }, 1000);
+  }, 1200);
 
   evaluateViewMode();
 }
@@ -2103,7 +2141,17 @@ $('btnDiagView').onclick = async () => {
   }
   if (!okRpc.length) log('  nenhum RPC de câmera respondeu.');
 
-  // ── 4. Referência: bounds + zoom (para heurística, se necessário) ──
+  // ── 4. Medida da viewport — base da detecção automática ──
+  const vm = viewportMetrics();
+  if (vm) {
+    const r = planAreaPx ? (vm.area / planAreaPx) : null;
+    log(`viewport: ${vm.dx.toFixed(0)} × ${vm.dy.toFixed(0)} px (área ${(vm.area / 1000).toFixed(0)}k px²)`);
+    log(`referência de planta: ${planAreaPx ? (planAreaPx / 1000).toFixed(0) + 'k px²' : 'ainda não aprendida'}${r ? ` | razão atual ${r.toFixed(2)}× (≥1.45 → 3D, ≤1.25 → 2D)` : ''}`);
+  } else {
+    log('viewport: mapView indisponível — detecção automática inoperante.', true);
+  }
+
+  // ── 5. Referência: bounds + zoom (comparativo) ──
   try {
     const res = await rpc.invoke('getMapBounds', []);
     const ring = ringFromBounds(res);
@@ -2145,6 +2193,9 @@ $('btnInspect').onclick = async () => {
   // Troca manual do modo do símbolo aplica imediatamente aos rótulos
   document.querySelectorAll('input[name="symMode"]').forEach((r) => {
     r.addEventListener('change', () => {
+      // Escolher 2D manualmente também CALIBRA a referência de planta:
+      // o usuário está afirmando que a vista atual é planta.
+      if (r.checked && r.value === '2d') calibratePlanArea();
       applyViewModeToNivel(effectiveMode());
     });
   });
