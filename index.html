@@ -682,7 +682,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V33 · © 2026 Königsberger Vannucchi
+  Beta V35 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -903,7 +903,12 @@ async function resolveProps(feature, keys) {
       const lv = Number(p.levels), ff = Number(p.floorToFloor);
       if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = lv * ff;
     }
-    if (h === null) return null;
+    if (h === null) {
+      // Geometria sem corpo (Point, linha, polígono plano): o topo COINCIDE
+      // com a base. Antes retornava null e o rótulo não era criado.
+      const b = resolveBaseHeight();
+      return b === null ? null : b;
+    }
     const b = resolveBaseHeight() || 0;
     return Math.round((h + b) * 100) / 100;
   };
@@ -1013,8 +1018,8 @@ function buildPopupHtml(title, values) {
     .map(([k, v]) => {
       if (v === null) return '';
       return `<tr>
-        <td style="padding:2px 8px 2px 0;color:#00ACCD;font-weight:600;">${PROP_PT[k] || k}</td>
-        <td style="padding:2px 0;color:#333;">${v}</td>
+        <td style="padding:3px 12px 3px 0;color:#00697d;font-weight:600;white-space:nowrap;">${PROP_PT[k] || k}</td>
+        <td style="padding:3px 0;color:#1b1b1b;font-weight:500;text-align:right;">${v}</td>
       </tr>`;
     })
     .filter(Boolean)
@@ -1022,11 +1027,47 @@ function buildPopupHtml(title, values) {
 
   if (!rows) return null;
 
-  return `<div style="font-family:Hind,sans-serif;font-size:12px;min-width:140px;">
-    <div style="font-weight:700;border-bottom:2px solid #00ACCD;margin-bottom:4px;padding-bottom:2px;">
+  // O popup do SDK não traz superfície própria — o conteúdo fica sobre o
+  // mapa e some entre as geometrias. Desenhamos a superfície aqui:
+  // branco levemente translúcido + desfoque do que está atrás, cantos
+  // retos e borda fina, conforme o KV Design System.
+  //
+  // O <style> neutraliza o container do Mapbox (padding e cantos
+  // arredondados nativos) quando ele hospeda o nosso conteúdo.
+  return `<style>
+    .mapboxgl-popup-content:has(.kv-popup){
+      padding:0!important;border-radius:0!important;
+      background:transparent!important;box-shadow:none!important;
+    }
+    .mapboxgl-popup-tip:has(+ .mapboxgl-popup-content .kv-popup){
+      border-top-color:rgba(255,255,255,0.94)!important;
+    }
+    .kv-popup .kv-popup-close{display:none;}
+  </style>
+  <div class="kv-popup" style="
+      font-family:Hind,system-ui,sans-serif;
+      font-size:12px;
+      line-height:1.45;
+      min-width:150px;
+      padding:10px 12px;
+      background:rgba(255,255,255,0.94);
+      -webkit-backdrop-filter:blur(3px);
+      backdrop-filter:blur(3px);
+      border:1px solid rgba(0,172,205,0.55);
+      border-radius:0;
+      color:#1b1b1b;">
+    <div style="
+        font-weight:700;
+        font-size:11px;
+        letter-spacing:0.08em;
+        text-transform:uppercase;
+        color:#1b1b1b;
+        border-bottom:2px solid #00ACCD;
+        margin-bottom:6px;
+        padding-bottom:4px;">
       ${title || 'Feature'}
     </div>
-    <table style="border-collapse:collapse;">${rows}</table>
+    <table style="border-collapse:collapse;width:100%;">${rows}</table>
   </div>`;
 }
 
@@ -1073,6 +1114,7 @@ function templateFromValues(values) {
 async function buildLabelFeatures(features, propKeys) {
   const out = [];
   const stamp = Date.now();
+  const missingReport = [];
   for (let i = 0; i < features.length; i++) {
     const f = features[i];
     const c = centroid(f);
@@ -1082,7 +1124,13 @@ async function buildLabelFeatures(features, propKeys) {
     // evita colisão com chaves nativas (usage, height, levels).
     const values = await resolveProps(f, propKeys);
     const { copiedProps, text } = templateFromValues(values);
-    if (!text) continue;
+    if (!text) {
+      // Diagnóstico: dizer QUAIS propriedades não existem nesta geometria,
+      // em vez de falhar silenciosamente com mensagem genérica.
+      const vazias = propKeys.map((k) => PROP_PT[k] || k).join(', ');
+      missingReport.push(`${f.geometry?.type || 'feature'} ${i + 1}: sem valor para ${vazias}`);
+      continue;
+    }
 
     // Eleva o ponto ao topo do elemento: baseHeight do ponto = topHeight
     // da origem (coordenada do arquivo, sem a cota base, que é só exibição)
@@ -1137,6 +1185,7 @@ async function buildLabelFeatures(features, propKeys) {
       },
     });
   }
+  missingReport.forEach((m) => log('Label não criado — ' + m, true));
   return out;
 }
 
@@ -1769,7 +1818,8 @@ async function applyNivelLabels(features) {
   }
 
   if (!out.length) {
-    log('Nenhum rótulo de nível a criar (Nível do Topo não resolvido).');
+    log('Nenhum rótulo de nível a criar — não foi possível resolver o Nível do Topo. '
+      + 'A geometria precisa ter altura (height/levels+piso a piso) ou uma cota de base definida.', true);
     return;
   }
   try {
@@ -1792,15 +1842,26 @@ $('btnApply').onclick = async () => {
   const wantLabel = $('outLabel').checked;
   const wantNivel = $('outNivel').checked;
   if (!wantPopup && !wantLabel && !wantNivel) { log('Selecione ao menos um tipo de saída.', true); return; }
-  if ((wantPopup || wantLabel) && !propKeys.length) { log('Selecione ao menos uma propriedade.', true); return; }
+
+  // O Rótulo de Nível não depende das propriedades de texto — ele usa o
+  // Nível do Topo. Só popup e label exigem propriedades marcadas.
+  const needsProps = wantPopup || wantLabel;
+  if (needsProps && !propKeys.length) {
+    if (wantNivel) {
+      log('Sem propriedades marcadas — gerando apenas o Rótulo de Nível (popup e label exigem ao menos uma propriedade).');
+    } else {
+      log('Selecione ao menos uma propriedade, ou marque o Rótulo de Nível.', true);
+      return;
+    }
+  }
 
   const feats = await readSelection();
   updateSelStatus(feats);
   if (!feats.length) { log('Nenhuma geometria selecionada no mapa.', true); return; }
 
   log(`Processando ${feats.length} feature(s)...`);
-  if (wantPopup) await applyPopups(feats, propKeys);
-  if (wantLabel) await applyLabels(feats, propKeys);
+  if (wantPopup && propKeys.length) await applyPopups(feats, propKeys);
+  if (wantLabel && propKeys.length) await applyLabels(feats, propKeys);
   if (wantNivel) await applyNivelLabels(feats);
 };
 
