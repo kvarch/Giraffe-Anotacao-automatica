@@ -585,6 +585,9 @@ main {
     <button id="btnInspect" class="btn-ghost" title="Despeja o JSON raw das properties da seleção no log" aria-label="Inspecionar propriedades">
       Inspecionar
     </button>
+    <button id="btnDiagView" class="btn-ghost" title="Despeja no log tudo que o SDK expõe sobre a câmera — use para calibrar a detecção Auto 2D/3D" aria-label="Diagnóstico da detecção de vista">
+      Diag. Vista
+    </button>
   </div>
 
   <!-- LOG -->
@@ -600,7 +603,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V26
+  KV Arquitetos · Gerador de Anotações · Beta V27
 </footer>
 
 <script type="module">
@@ -1321,6 +1324,52 @@ function pitchFromState() {
   return null;
 }
 
+// Alguns builds do Giraffe expõem apenas um booleano de modo 3D em vez
+// do pitch numérico. Procuramos essa flag como segunda via.
+function deepFind3dFlag(v, depth = 0, seen = new Set()) {
+  if (v == null || depth > 4 || typeof v !== 'object') return undefined;
+  if (seen.has(v)) return undefined;
+  seen.add(v);
+  if (Array.isArray(v)) {
+    if (v.length > 50) return undefined;
+    for (const item of v) {
+      const r = deepFind3dFlag(item, depth + 1, seen);
+      if (typeof r === 'boolean') return r;
+    }
+    return undefined;
+  }
+  for (const [k, val] of Object.entries(v)) {
+    if (HEAVY_KEYS.has(k)) continue;
+    const lk = k.toLowerCase();
+    if (typeof val === 'boolean' && (lk === 'is3d' || lk === 'threed' || lk === 'in3d' || lk === 'mode3d' || lk === 'perspective')) {
+      return val;
+    }
+    if (typeof val === 'string' && (lk === 'viewmode' || lk === 'mapmode' || lk === 'mode')) {
+      const lv = val.toLowerCase();
+      if (lv === '3d' || lv === 'perspective') return true;
+      if (lv === '2d' || lv === 'plan' || lv === 'top') return false;
+    }
+    const r = deepFind3dFlag(val, depth + 1, seen);
+    if (typeof r === 'boolean') return r;
+  }
+  return undefined;
+}
+
+let flagKey = null;
+function modeFromFlag() {
+  const keys = flagKey ? [flagKey] : giraffeStateKeys();
+  for (const key of keys) {
+    try {
+      const f = deepFind3dFlag(giraffeState.get(key));
+      if (typeof f === 'boolean') {
+        if (!flagKey) { flagKey = key; log(`Detecção de vista: flag 3D encontrada em giraffeState '${key}'.`); }
+        return f ? '3d' : '2d';
+      }
+    } catch (e) { /* chave inexistente */ }
+  }
+  return null;
+}
+
 // ─── M2: geometria da viewport (trapézio = perspectiva) ───
 // Só passa a comandar o modo depois de PROVAR que o polígono retornado
 // é a viewport real (já observou um trapézio). Enquanto não provar, não
@@ -1382,6 +1431,11 @@ async function evaluateViewMode() {
     const p = pitchFromState();
     if (typeof p === 'number') {
       setViewMode(p < 5 ? '2d' : '3d', `pitch ${p.toFixed(1)}°`);
+      return;
+    }
+    const flagMode = modeFromFlag();
+    if (flagMode) {
+      setViewMode(flagMode, 'flag de modo do Giraffe');
       return;
     }
     const m = await modeFromBounds();
@@ -1944,19 +1998,92 @@ function setupAutoSync() {
 $('btnUpdateAll').onclick = () => updatePoints(false, 'all');
 $('btnUpdateSel').onclick = () => updatePoints(false, 'selected');
 
-$('btnInspect').onclick = async () => {
-  // Diagnóstico da detecção de vista — ajuda a confirmar qual método está ativo
-  try {
-    const p = pitchFromState();
-    let res = null;
-    try { res = await rpc.invoke('getMapBounds', []); } catch (e) {}
-    const ring = ringFromBounds(res);
-    const ratio = ring ? trapezoidRatio(ring) : null;
-    log(`--- Diagnóstico de vista --- modo atual: ${currentViewMode.toUpperCase()} | seletor: ${symbolModeSetting()}`);
-    log(`pitch no estado: ${typeof p === 'number' ? p.toFixed(1) + '°' : 'não encontrado'}${pitchKey ? ` (chave '${pitchKey}')` : ''}`);
-    log(`viewport: ${ring ? `razão ${ratio ? ratio.toFixed(3) : '?'} (>1.12 = 3D, <=1.03 = 2D)` : 'polígono indisponível'} | método provado: ${boundsProven ? 'sim' : 'ainda não'}`);
-  } catch (e) { log('Diagnóstico de vista falhou: ' + e.message, true); }
+/* =========================================================
+   DIAGNÓSTICO DA DETECÇÃO DE VISTA
+   Despeja no log tudo que o SDK expõe sobre a câmera. Serve para
+   calibrar a detecção Auto quando o pitch não está em chave conhecida.
+   ========================================================= */
 
+// Busca profunda por qualquer sinal de câmera, retornando os CAMINHOS
+function findCameraSignals(v, path = '', depth = 0, seen = new Set(), hits = []) {
+  if (v == null || depth > 5 || typeof v !== 'object') return hits;
+  if (seen.has(v)) return hits;
+  seen.add(v);
+  if (Array.isArray(v)) {
+    if (v.length > 30) return hits;
+    v.forEach((item, i) => findCameraSignals(item, `${path}[${i}]`, depth + 1, seen, hits));
+    return hits;
+  }
+  for (const [k, val] of Object.entries(v)) {
+    if (HEAVY_KEYS.has(k)) continue;
+    const p = path ? `${path}.${k}` : k;
+    const lk = k.toLowerCase();
+    if (typeof val === 'number' && ['pitch', 'bearing', 'zoom', 'rotation', 'tilt'].includes(lk)) {
+      hits.push(`${p} = ${val}`);
+    } else if (typeof val === 'boolean' && (lk.includes('3d') || lk.includes('2d') || lk.includes('perspective') || lk.includes('plan'))) {
+      hits.push(`${p} = ${val}`);
+    } else if (typeof val === 'string' && (lk.includes('mode') || lk.includes('view')) && val.length < 24) {
+      hits.push(`${p} = "${val}"`);
+    } else {
+      findCameraSignals(val, p, depth + 1, seen, hits);
+    }
+  }
+  return hits;
+}
+
+$('btnDiagView').onclick = async () => {
+  log('══════ DIAGNÓSTICO DE VISTA ══════');
+  log(`modo atual: ${currentViewMode.toUpperCase()} | seletor: ${symbolModeSetting()} | bounds provado: ${boundsProven ? 'sim' : 'não'}`);
+
+  // 1. Chaves visíveis do giraffeState
+  const keys = giraffeStateKeys();
+  log(`chaves do giraffeState (${keys.length}): ${keys.join(', ')}`);
+
+  // 2. Sinais de câmera em cada chave
+  let anySignal = false;
+  for (const key of keys) {
+    let v;
+    try { v = giraffeState.get(key); } catch (e) { continue; }
+    if (v == null) continue;
+    if (typeof v !== 'object') { log(`  ${key} = ${JSON.stringify(v)}`.slice(0, 200)); continue; }
+    const hits = findCameraSignals(v);
+    if (hits.length) {
+      anySignal = true;
+      log(`  ${key} → ${hits.slice(0, 12).join(' | ')}`);
+    }
+  }
+  if (!anySignal) log('  nenhum sinal de câmera (pitch/bearing/zoom/3d) em nenhuma chave.');
+
+  // 3. Retorno cru do getMapBounds — é o que alimenta o método geométrico
+  try {
+    const res = await rpc.invoke('getMapBounds', []);
+    const s = JSON.stringify(res);
+    log(`getMapBounds (${s.length} chars): ${s.slice(0, 900)}${s.length > 900 ? ' …[truncado]' : ''}`);
+    const ring = ringFromBounds(res);
+    if (ring) {
+      const ratio = trapezoidRatio(ring);
+      log(`  anel extraído: ${ring.length} pts | razão lados opostos: ${ratio ? ratio.toFixed(4) : 'n/d'}`);
+      log('  (retângulo ≈ 1.000 → planta; trapézio > 1.12 → perspectiva)');
+    } else {
+      log('  anel NÃO extraído — formato inesperado; o método geométrico não funciona com esta resposta.', true);
+    }
+  } catch (e) {
+    log('getMapBounds falhou: ' + e.message, true);
+  }
+
+  // 4. Outras funções que possam revelar a câmera
+  for (const fn of ['getMapStyle', 'getCameraPosition', 'getMapCamera', 'getView']) {
+    try {
+      const r = await rpc.invoke(fn, []);
+      if (r == null) continue;
+      const hits = typeof r === 'object' ? findCameraSignals(r) : [];
+      log(`${fn}: ${hits.length ? hits.slice(0, 10).join(' | ') : 'sem sinais de câmera'}`);
+    } catch (e) { /* função inexistente */ }
+  }
+  log('══════ FIM DO DIAGNÓSTICO ══════');
+};
+
+$('btnInspect').onclick = async () => {
   const feats = await readSelection();
   if (!feats.length) { log('Nada selecionado para inspecionar.', true); return; }
   feats.forEach((f, i) => {
