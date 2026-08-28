@@ -682,7 +682,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V42 · © 2026 Königsberger Vannucchi
+  Beta V45 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -987,11 +987,16 @@ function setupSelectionListener() {
       giraffeState.addListener([key], async () => {
         const feats = await readSelection();
         updateSelStatus(feats);
-        // NOTA: até a v41 o app reexibia aqui o popup registrado quando o
-        // elemento de origem era reselecionado. Cada addHtmlPopup cria um
-        // passo no "desfazer" do Giraffe, então simplesmente navegar pelo
-        // projeto entupia o histórico. O popup agora só é criado quando
-        // você clica em Aplicar Anotações.
+        // Reexibe popup registrado se o elemento de origem for reselecionado
+        if (feats.length === 1) {
+          const srcId = feats[0].properties?.id || feats[0].id;
+          const saved = srcId ? popupRegistry.get(srcId) : null;
+          if (saved) {
+            try {
+              await rpc.invoke('addHtmlPopup', [saved.html, saved.location, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
+            } catch (e) { /* silencioso */ }
+          }
+        }
       });
     } catch (e) {
       // chave inexistente nesta versão — ignorar silenciosamente
@@ -1022,32 +1027,17 @@ function buildPopupHtml(title, values) {
 
   if (!rows) return null;
 
-  // O popup do SDK não traz superfície própria — o conteúdo fica sobre o
-  // mapa e some entre as geometrias. Desenhamos a superfície aqui:
-  // branco levemente translúcido + desfoque do que está atrás, cantos
-  // retos e borda fina, conforme o KV Design System.
-  //
-  // O <style> neutraliza o container do Mapbox (padding e cantos
-  // arredondados nativos) quando ele hospeda o nosso conteúdo.
-  return `<style>
-    .mapboxgl-popup-content:has(.kv-popup){
-      padding:0!important;border-radius:0!important;
-      background:transparent!important;box-shadow:none!important;
-    }
-    .mapboxgl-popup-tip:has(+ .mapboxgl-popup-content .kv-popup){
-      border-top-color:rgba(255,255,255,0.94)!important;
-    }
-    .kv-popup .kv-popup-close{display:none;}
-  </style>
-  <div class="kv-popup" style="
+  // Superfície do popup em estilos INLINE apenas. A v35 injetava um bloco
+  // <style> com regras globais (.mapboxgl-popup-content) no documento do
+  // Giraffe; como o problema do desfazer apareceu junto com as mudanças
+  // do popup, essa injeção foi eliminada por precaução.
+  return `<div style="
       font-family:Hind,system-ui,sans-serif;
       font-size:12px;
       line-height:1.45;
       min-width:150px;
-      padding:10px 12px;
+      padding:8px 10px;
       background:rgba(255,255,255,0.94);
-      -webkit-backdrop-filter:blur(3px);
-      backdrop-filter:blur(3px);
       border:1px solid rgba(0,172,205,0.55);
       border-radius:0;
       color:#1b1b1b;">
@@ -1056,7 +1046,6 @@ function buildPopupHtml(title, values) {
         font-size:11px;
         letter-spacing:0.08em;
         text-transform:uppercase;
-        color:#1b1b1b;
         border-bottom:2px solid #00ACCD;
         margin-bottom:6px;
         padding-bottom:4px;">
@@ -1064,94 +1053,6 @@ function buildPopupHtml(title, values) {
     </div>
     <table style="border-collapse:collapse;width:100%;">${rows}</table>
   </div>`;
-}
-
-/* =========================================================
-   ELEVAÇÃO DO POPUP ATÉ O TOPO DO ELEMENTO
-   O popup do Mapbox é ancorado apenas por lng/lat — não tem componente
-   de altura. Num elemento alto, ele fica no chão enquanto o volume sobe.
-   Compensamos com um deslocamento em PIXELS na tela.
-
-   Quanto uma altura h desloca verticalmente na tela depende da
-   inclinação da câmera: em planta (pitch 0) não desloca nada, pois o
-   topo projeta sobre a base; quanto mais inclinada, maior o efeito.
-   O deslocamento é ≈ (h / metros-por-pixel) × sen(pitch).
-
-   O pitch não é exposto pelo SDK (ver diagnóstico da v28), mas a razão
-   entre a área da viewport e a área em planta cresce com ele. Usando
-   r = área / área-em-planta, temos cos(pitch) ≈ 1/r, logo
-   sen(pitch) ≈ √(1 − 1/r²) — que vale 0 em planta e tende a 1 quando
-   a câmera deita. Aproximação, mas monotônica e bem comportada.
-   ========================================================= */
-
-// ── ESCALA E INCLINAÇÃO — SEM DEPENDER DO ZOOM ───────────────────────
-// O mapView.zoom não acompanha a câmera de forma confiável (no
-// diagnóstico da v28 ele ficou parado em 17.058 enquanto a bbox mudava).
-// Como o offset do popup é em pixels e escala com o zoom, usar um zoom
-// defasado fazia o deslocamento explodir ao afastar a câmera.
-//
-// Aqui a escala vem de grandezas que SEMPRE refletem a câmera atual:
-//   • dyM  — altura da viewport em metros, direto de mapView.bounds
-//   • altura do canvas ≈ window.innerHeight (o painel ocupa a janela)
-//
-// Falta descontar o efeito da inclinação, que estica a viewport na
-// vertical. A razão de aspecto (dxM/dyM) resolve isso e é imune ao zoom:
-// em planta ela vale a proporção do canvas; ao inclinar, dyM cresce e a
-// razão cai. Logo  kY = aspecto-em-planta / aspecto-atual  mede o quanto
-// a viewport esticou, e daí saem tanto a escala quanto o pitch:
-//   metros-por-pixel = dyM / (altura-canvas × kY)
-//   cos(pitch) ≈ 1/kY   →   sen(pitch) ≈ √(1 − 1/kY²)
-
-const ASPECT_PLAN_STORE = 'kv_annot_aspect_plan';
-let aspectPlan = parseFloat(localStorage.getItem(ASPECT_PLAN_STORE)) || null;
-const POPUP_MAX_OFFSET_PX = 2000;
-
-// O aspecto é MÁXIMO em planta (inclinar só reduz), então aprendemos o maior
-function calibrateAspectPlan(force) {
-  const m = viewportMetrics();
-  if (!m || !isFinite(m.aspect) || m.aspect <= 0) return;
-  if (force || aspectPlan === null || m.aspect > aspectPlan * 1.02) {
-    aspectPlan = m.aspect;
-    localStorage.setItem(ASPECT_PLAN_STORE, String(aspectPlan));
-  }
-}
-
-// Quanto a viewport esticou na vertical por causa da inclinação
-function verticalStretch() {
-  const m = viewportMetrics();
-  if (!m || !aspectPlan || !isFinite(m.aspect) || m.aspect <= 0) return 1;
-  const k = aspectPlan / m.aspect;
-  return Math.min(Math.max(k, 1), 12);
-}
-
-// Metros por pixel reais na tela — sem usar o zoom
-function metersPerPixel() {
-  const m = viewportMetrics();
-  if (!m) return null;
-  const canvasH = window.innerHeight;
-  if (!canvasH || canvasH < 200) return null;
-  const v = m.dyM / (canvasH * verticalStretch());
-  return isFinite(v) && v > 0 ? v : null;
-}
-
-function sinPitchEstimate() {
-  const k = verticalStretch();
-  if (k <= 1.02) return 0;
-  return Math.sqrt(Math.max(0, 1 - 1 / (k * k)));
-}
-
-/* O popup do Mapbox é ancorado por lng/lat e NÃO tem componente de
-   altura. Elevá-lo até o topo exigia um deslocamento em pixels que
-   depende do zoom e da inclinação — ou seja, teria de ser reescrito a
-   cada movimento de câmera. E cada reescrita (addHtmlPopup) cria um
-   passo no "desfazer" do Giraffe, o que quebrava o Ctrl+Z.
-
-   Por isso o popup é ancorado no CENTRO do elemento, igual em 2D e 3D:
-   uma posição fixa no mundo, que não precisa de recálculo nenhum. O
-   addHtmlPopup passa a ser chamado uma única vez, quando você clica em
-   Aplicar — e o histórico de desfazer fica limpo. */
-function popupOptions() {
-  return { closeButton: true, maxWidth: '320px' };
 }
 
 async function applyPopups(features, propKeys) {
@@ -1165,14 +1066,13 @@ async function applyPopups(features, propKeys) {
     const title = getProp(f, 'name') || getProp(f, 'usage') || 'Feature';
     const html = buildPopupHtml(title, values);
     if (!html) continue;
-
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
-      // Uma única chamada por feature — ver nota sobre o desfazer acima.
-      await rpc.invoke('addHtmlPopup', [html, c, popupOptions()]);
+      await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
       const srcId = f.properties?.id || f.id;
-      if (srcId) popupRegistry.set(srcId, { location: c, html, srcId, propKeys });
-      log(`Popup criado no centro do elemento [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
+      if (srcId) popupRegistry.set(srcId, { location: c, html });
+      log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
+      try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
     } catch (e) {
       log('addHtmlPopup falhou: ' + e.message, true);
@@ -1723,15 +1623,10 @@ function viewportMetrics() {
   const mPerPx = (156543.03392 * cosLat) / Math.pow(2, mv.zoom);
   if (!isFinite(mPerPx) || mPerPx <= 0) return null;
 
-  // Dimensões da viewport em METROS — não dependem do zoom informado
-  const dxM = (east - west) * 111320 * cosLat;
-  const dyM = (north - south) * 110574;
-  if (!isFinite(dxM) || !isFinite(dyM) || dxM <= 0 || dyM <= 0) return null;
-
-  const dx = dxM / mPerPx;
-  const dy = dyM / mPerPx;
+  const dx = ((east - west) * 111320 * cosLat) / mPerPx;
+  const dy = ((north - south) * 110574) / mPerPx;
   if (!isFinite(dx) || !isFinite(dy) || dx <= 0 || dy <= 0) return null;
-  return { dx, dy, area: dx * dy, dxM, dyM, lat0, aspect: dxM / dyM };
+  return { dx, dy, area: dx * dy };
 }
 
 // Fixa a referência de planta (chamado quando o usuário escolhe 2D manual)
@@ -1776,18 +1671,11 @@ function ringFromBounds(res) {
 }
 
 // ─── Orquestração ───
-// Movimentos de câmera provocados pelo próprio app (flyTo do popup) não
-// devem disparar troca de símbolo — seria uma escrita em rawSections que
-// o usuário não pediu, poluindo o histórico de desfazer.
-let suppressViewSwitchUntil = 0;
-
 function setViewMode(mode, why) {
   if (!mode || mode === currentViewMode) return;
   currentViewMode = mode;
   log(`Vista: ${mode.toUpperCase()} (${why}).`);
-  if (symbolModeSetting() !== 'auto') return;
-  if (Date.now() < suppressViewSwitchUntil) return;   // câmera movida pelo app
-  applyViewModeToNivel(mode);
+  if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
 }
 
 let evaluating = false;
@@ -1807,8 +1695,6 @@ function evaluateViewMode() {
       setViewMode(flagMode, 'flag de modo do Giraffe');
       return;
     }
-    // Aprende a escala real do mapa sempre que passamos por vista de planta
-    calibrateAspectPlan();
     // M2: área normalizada da viewport (método efetivo nesta versão)
     const m = modeFromViewport();
     if (m) {
@@ -2057,29 +1943,6 @@ function followSource(pt, src) {
   };
 }
 
-/* =========================================================
-   ASSINATURA DA ORIGEM — protege o histórico de "desfazer"
-   O Giraffe registra no undo TODA escrita em rawSections, inclusive as
-   do app. Sem cuidado, o ciclo era: o usuário desfaz → o listener vê os
-   rótulos "dessincronizados" → o app reescreve → o próximo Ctrl+Z desfaz
-   essa reescrita em vez da edição do usuário.
-
-   Para quebrar isso, cada ponto guarda em sp_syncSig uma assinatura do
-   estado da ORIGEM no momento da última sincronização. Se a assinatura
-   não mudou, a origem está intacta e qualquer diferença no ponto veio do
-   usuário (edição manual ou desfazer) — então o app não escreve nada.
-   ========================================================= */
-function sourceSignature(values, topElev, srcCentroid) {
-  const c = Array.isArray(srcCentroid)
-    ? [Number(srcCentroid[0].toFixed(9)), Number(srcCentroid[1].toFixed(9))]
-    : null;
-  try {
-    return JSON.stringify([values, topElev, c]);
-  } catch (e) {
-    return String(topElev) + '|' + String(c);
-  }
-}
-
 async function updatePoints(auto = false, scope = 'all') {
   // Lê direto de giraffeState.rawSections — inclui features em layers
   // ocultos (visibilidade é só de renderização, os dados continuam lá).
@@ -2195,17 +2058,12 @@ async function updatePoints(auto = false, scope = 'all') {
       const topElevN = srcIsEvaluated
         ? ((await resolveProps(src, ['height'])).height || 0)
         : pt.properties.baseHeight;  // preserva cota quando não avaliado
-
-      // A origem mudou desde a última sincronização? Se não, respeitamos
-      // o estado atual do ponto (edição manual ou desfazer) e não escrevemos.
-      const sigN = sourceSignature({ nv }, topElevN, centroid(src));
-      const srcUnchangedN = pt.properties.sp_syncSig === sigN;
-      const symOutdated = pt.properties.sp_sym !== SYM_VERSION;
-      if (srcUnchangedN && !symOutdated) continue;
-
       const nvChanged = nv !== null && pt.properties.kv_nivelDoTopo !== nv;
       const elevChangedN =
         pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
+      // Símbolo desenhado por uma versão anterior — regenerar para que o
+      // marcador volte a coincidir com o ponto de ancoragem.
+      const symOutdated = pt.properties.sp_sym !== SYM_VERSION;
 
       // Segue o deslocamento da origem preservando o arraste manual
       const followN = followSource(pt, src);
@@ -2234,7 +2092,6 @@ async function updatePoints(auto = false, scope = 'all') {
           _baseHeight: topElevN,
           sp_srcAnchor: followN.anchor,
           sp_sym: SYM_VERSION,
-          sp_syncSig: sigN,
           sp_scaleBase: scN.base,
           sp_scaleApplied: scN.scale,
           marker: {
@@ -2264,13 +2121,6 @@ async function updatePoints(auto = false, scope = 'all') {
     const topElev = srcIsEvaluated
       ? ((await resolveProps(src, ['height'])).height || 0)
       : pt.properties.baseHeight;  // preserva cota existente quando não avaliado
-
-    // A origem mudou desde a última sincronização? Se não, o ponto fica
-    // como está — assim o "desfazer" do Giraffe não é consumido por
-    // reescritas do app, e edições manuais no rótulo são respeitadas.
-    const sig = sourceSignature(values, topElev, centroid(src));
-    if (pt.properties.sp_syncSig === sig) continue;
-
     const elevChanged =
       pt.properties.baseHeight !== topElev || pt.properties._baseHeight !== topElev;
 
@@ -2326,7 +2176,6 @@ async function updatePoints(auto = false, scope = 'all') {
         baseHeight: topElev,
         _baseHeight: topElev,
         sp_srcAnchor: follow.anchor,
-        sp_syncSig: sig,
         ...(useAppProps ? { sp_props: propKeys } : {}),
         marker: {
           ...pt.properties.marker,
@@ -2544,19 +2393,6 @@ $('btnDiagView').onclick = async () => {
   }
   if (!okRpc.length) log('  nenhum RPC de câmera respondeu.');
 
-  // ── 4b. Escala do popup (independente do zoom) ──
-  {
-    const m = viewportMetrics();
-    if (m) {
-      const k = verticalStretch();
-      const mpp = metersPerPixel();
-      const sp = sinPitchEstimate();
-      log(`viewport metros: ${m.dxM.toFixed(1)} × ${m.dyM.toFixed(1)} | aspecto ${m.aspect.toFixed(3)} | aspecto em planta ${aspectPlan ? aspectPlan.toFixed(3) : 'não aprendido'}`);
-      log(`esticamento vertical k=${k.toFixed(3)} | sen(pitch)≈${sp.toFixed(3)} (pitch≈${(Math.asin(Math.min(1, sp)) * 180 / Math.PI).toFixed(0)}°)`);
-      log(`canvas ${window.innerHeight}px | m/px ${mpp ? mpp.toFixed(4) : 'n/d'} | offset p/ 30m: ${mpp ? (30 / mpp * sp).toFixed(0) + 'px' : 'n/d'}`);
-    }
-  }
-
   // ── 4. Medida da viewport — base da detecção automática ──
   const vm = viewportMetrics();
   if (vm) {
@@ -2643,7 +2479,7 @@ function setupTabs() {
     r.addEventListener('change', () => {
       // Escolher 2D manualmente também CALIBRA a referência de planta:
       // o usuário está afirmando que a vista atual é planta.
-      if (r.checked && r.value === '2d') { calibratePlanArea(); calibrateAspectPlan(true); }
+      if (r.checked && r.value === '2d') calibratePlanArea();
       applyViewModeToNivel(effectiveMode());
     });
   });
