@@ -174,6 +174,79 @@ body {
 .log-wrap-tall #log { max-height: none; min-height: 320px; }
 
 /* ==========================================================================
+   PAINEL DE INFORMAÇÕES
+   ========================================================================== */
+#infoStatus {
+  background-color: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--md-sys-color-on-surface-variant);
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+.info-card {
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--r);
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.info-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 2px solid var(--md-sys-color-primary);
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+}
+
+.info-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--md-sys-color-on-surface);
+  overflow-wrap: anywhere;
+}
+
+.info-geom {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+}
+
+.info-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+.info-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--md-sys-color-primary);
+  padding: 4px 12px 4px 0;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.info-table td {
+  text-align: right;
+  color: var(--md-sys-color-on-surface);
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.info-table tr + tr th,
+.info-table tr + tr td { border-top: 1px solid var(--md-sys-color-outline-variant); }
+
+.info-empty { color: var(--md-sys-color-on-surface-variant); }
+
+.info-unit { font-size: 11px; color: var(--md-sys-color-on-surface-variant); margin-left: 2px; }
+
+/* ==========================================================================
    MAIN SCROLL AREA
    ========================================================================== */
 main {
@@ -527,6 +600,7 @@ main {
 <!-- ===================== ABAS ===================== -->
 <nav class="tab-bar" role="tablist" aria-label="Seções do aplicativo">
   <button class="tab" id="tabAnotacoes" role="tab" aria-selected="true" aria-controls="panelAnotacoes" data-panel="panelAnotacoes">Anotações</button>
+  <button class="tab" id="tabInfo" role="tab" aria-selected="false" aria-controls="panelInfo" data-panel="panelInfo">Informações</button>
   <button class="tab" id="tabLog" role="tab" aria-selected="false" aria-controls="panelLog" data-panel="panelLog">Log e Diagnóstico</button>
 </nav>
 
@@ -652,7 +726,25 @@ main {
 
   </div>
 
-  <!-- ═══════════════ PAINEL 2 — LOG E DIAGNÓSTICO ═══════════════ -->
+  <!-- ═══════════════ PAINEL 2 — INFORMAÇÕES DO ELEMENTO ═══════════════ -->
+  <div id="panelInfo" class="tab-panel" role="tabpanel" aria-labelledby="tabInfo" hidden>
+
+    <div id="infoStatus">
+      <span>Clique em um elemento no mapa para ver suas propriedades.</span>
+    </div>
+
+    <section class="kv-card" aria-label="Opções de exibição">
+      <label class="kv-check-label" style="min-height:32px">
+        <input type="checkbox" id="infoOnlyFilled" />
+        <span>Ocultar propriedades sem valor</span>
+      </label>
+    </section>
+
+    <div id="infoContent" aria-live="polite"></div>
+
+  </div>
+
+  <!-- ═══════════════ PAINEL 3 — LOG E DIAGNÓSTICO ═══════════════ -->
   <div id="panelLog" class="tab-panel" role="tabpanel" aria-labelledby="tabLog" hidden>
 
     <section class="kv-card" aria-label="Ferramentas de diagnóstico">
@@ -704,7 +796,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V53 · © 2026 Königsberger Vannucchi
+  Beta V54 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -744,6 +836,7 @@ function saveUiState() {
     seaLevel: $('seaLevel').value,
     textSize: $('textSize').value,
     updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
+    infoOnlyFilled: $('infoOnlyFilled').checked,
     symMode: symbolModeSetting(),
   };
   localStorage.setItem(UI_STORE, JSON.stringify(state));
@@ -762,6 +855,7 @@ function restoreUiState() {
   if (typeof state.outPopup === 'boolean') $('outPopup').checked = state.outPopup;
   if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
   if (typeof state.outNivel === 'boolean') $('outNivel').checked = state.outNivel;
+  if (typeof state.infoOnlyFilled === 'boolean') $('infoOnlyFilled').checked = state.infoOnlyFilled;
   if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
   if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
@@ -1028,6 +1122,7 @@ function setupSelectionListener() {
         const feats = await readSelection();
         updateSelStatus(feats);
         await refreshPopupOnSelection(feats);
+        renderInfoPanel(feats);
       });
     } catch (e) {
       // chave inexistente nesta versão — ignorar silenciosamente
@@ -2780,6 +2875,104 @@ $('btnInspect').onclick = async () => {
   });
 };
 
+
+/* =========================================================
+   PAINEL DE INFORMAÇÕES DO ELEMENTO
+   Mostra, para o que estiver selecionado no mapa, todas as propriedades
+   da lista "Propriedades a exibir" resolvidas pelo mesmo motor usado nas
+   anotações (resolveProps) — mesmos fallbacks, mesmos valores.
+
+   Não escreve nada no projeto: é só leitura. Por isso não passa pelo
+   histórico de "desfazer" e não interfere na seleção no mapa, ao
+   contrário do popup.
+
+   A renderização só acontece com a aba aberta; enquanto ela estiver
+   fechada, a seleção fica marcada como pendente e é desenhada quando
+   você abrir. Assim não se gastam chamadas de RPC à toa.
+   ========================================================= */
+const UNITS = {
+  area: 'm²', height: 'm', baseHeight: 'm', alturaDoTopo: 'm',
+  nivelDaBase: 'm', nivelDoTopo: 'm', floorToFloor: 'm',
+};
+
+let infoPending = true;
+let infoLastFeats = [];
+const MAX_INFO_CARDS = 10;
+
+function infoPanelVisible() {
+  const p = document.getElementById('panelInfo');
+  return !!(p && !p.hidden);
+}
+
+function fmtInfo(v) {
+  if (typeof v === 'number') {
+    return v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  }
+  return String(v);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+async function renderInfoPanel(feats) {
+  infoLastFeats = feats || [];
+  if (!infoPanelVisible()) { infoPending = true; return; }
+  infoPending = false;
+
+  const status = $('infoStatus');
+  const box = $('infoContent');
+  if (!status || !box) return;
+
+  if (!infoLastFeats.length) {
+    status.innerHTML = '<span>Clique em um elemento no mapa para ver suas propriedades.</span>';
+    box.innerHTML = '';
+    return;
+  }
+
+  const n = infoLastFeats.length;
+  const shown = Math.min(n, MAX_INFO_CARDS);
+  status.innerHTML = n === 1
+    ? '<span><strong>1</strong> elemento selecionado</span>'
+    : `<span><strong>${n}</strong> elementos selecionados${n > shown ? ` — exibindo os ${shown} primeiros` : ''}</span>`;
+
+  const onlyFilled = $('infoOnlyFilled')?.checked;
+  const keys = DEFAULT_PROPS.map((p) => p.key);
+  const parts = [];
+
+  for (let i = 0; i < shown; i++) {
+    const f = infoLastFeats[i];
+    let values = {};
+    try { values = await resolveProps(f, keys); } catch (e) { /* segue com vazio */ }
+
+    const title = getProp(f, 'name') || getProp(f, 'usage') || `Elemento ${i + 1}`;
+    const geom = f.geometry?.type || '—';
+
+    const rows = DEFAULT_PROPS.map((p) => {
+      const v = values[p.key];
+      const vazio = v === null || v === undefined || v === '';
+      if (vazio && onlyFilled) return '';
+      const unit = UNITS[p.key] ? `<span class="info-unit">${UNITS[p.key]}</span>` : '';
+      const cell = vazio
+        ? '<span class="info-empty">—</span>'
+        : `${escapeHtml(fmtInfo(v))}${unit}`;
+      return `<tr><th>${escapeHtml(p.pt)}</th><td>${cell}</td></tr>`;
+    }).filter(Boolean).join('');
+
+    parts.push(`<div class="info-card">
+      <div class="info-card-head">
+        <span class="info-title">${escapeHtml(title)}</span>
+        <span class="info-geom">${escapeHtml(geom)}</span>
+      </div>
+      <table class="info-table">${rows || '<tr><td class="info-empty">Sem propriedades com valor.</td></tr>'}</table>
+    </div>`);
+  }
+
+  box.innerHTML = parts.join('');
+}
+
 /* =========================================================
    ABAS — troca de painel (não interfere na lógica existente)
    ========================================================= */
@@ -2807,6 +3000,8 @@ function setupTabs() {
       if (panel) panel.hidden = !on;
     });
     try { localStorage.setItem('kv_annot_tab', target); } catch (e) {}
+    // Abrindo Informações com seleção pendente: desenha agora
+    if (target === 'panelInfo' && infoPending) renderInfoPanel(infoLastFeats);
   };
   tabs.forEach((t) => {
     t.addEventListener('click', () => select(t.dataset.panel));
@@ -2855,8 +3050,10 @@ function setupTabs() {
   }
   // Persiste qualquer mudança de UI automaticamente
   document.body.addEventListener('change', saveUiState);
+  $('infoOnlyFilled').addEventListener('change', () => renderInfoPanel(infoLastFeats));
   const feats = await readSelection();
   updateSelStatus(feats);
+  renderInfoPanel(feats);   // preenche o painel se a aba já estiver aberta
 })();
 </script>
 </body>
