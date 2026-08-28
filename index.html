@@ -603,7 +603,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V27
+  KV Arquitetos · Gerador de Anotações · Beta V28
 </footer>
 
 <script type="module">
@@ -2032,55 +2032,95 @@ function findCameraSignals(v, path = '', depth = 0, seen = new Set(), hits = [])
 }
 
 $('btnDiagView').onclick = async () => {
-  log('══════ DIAGNÓSTICO DE VISTA ══════');
-  log(`modo atual: ${currentViewMode.toUpperCase()} | seletor: ${symbolModeSetting()} | bounds provado: ${boundsProven ? 'sim' : 'não'}`);
+  log('══════ DIAGNÓSTICO DE VISTA (varredura ampla) ══════');
+  log(`modo atual: ${currentViewMode.toUpperCase()} | seletor: ${symbolModeSetting()}`);
 
-  // 1. Chaves visíveis do giraffeState
-  const keys = giraffeStateKeys();
-  log(`chaves do giraffeState (${keys.length}): ${keys.join(', ')}`);
+  // ── 1. Varredura ampla de chaves do giraffeState ──
+  // Lista abrangente: chaves documentadas + variações plausíveis.
+  const PROBE_KEYS = [
+    'mapView', 'mapContent', 'mapStyle', 'mapState', 'mapCamera', 'mapPitch',
+    'camera', 'cameraPosition', 'view', 'views', 'viewState', 'viewport',
+    'activeView', 'currentView', 'projectView', 'viewMode', 'mapMode',
+    'is3d', 'is3D', 'threeD', 'perspective', 'planView',
+    'project', 'projectBundle', 'projectSettings', 'appState', 'uiState',
+    'selected', 'selectedFeatures', 'mapSelectCoord', 'mapHoverCoords',
+    'projectLayers', 'layers', 'layerTree', 'drawingLayers',
+    'usages', 'flows', 'scenarios', 'activeScenario', 'drawTool',
+    'isolateMode', 'settings', 'preferences', 'renderSettings',
+    'sunPosition', 'solar', 'terrain', 'zoom', 'bearing', 'pitch',
+  ];
 
-  // 2. Sinais de câmera em cada chave
-  let anySignal = false;
-  for (const key of keys) {
+  const existing = [];
+  for (const key of PROBE_KEYS) {
     let v;
     try { v = giraffeState.get(key); } catch (e) { continue; }
-    if (v == null) continue;
-    if (typeof v !== 'object') { log(`  ${key} = ${JSON.stringify(v)}`.slice(0, 200)); continue; }
+    if (v === undefined || v === null) continue;
+    existing.push(key);
+  }
+  log(`chaves COM valor (${existing.length}): ${existing.join(', ') || 'nenhuma'}`);
+
+  // ── 2. Conteúdo de cada chave existente ──
+  for (const key of existing) {
+    let v;
+    try { v = giraffeState.get(key); } catch (e) { continue; }
+    if (typeof v !== 'object') {
+      log(`  [${key}] (${typeof v}) = ${String(v).slice(0, 120)}`);
+      continue;
+    }
+    if (Array.isArray(v)) {
+      log(`  [${key}] array(${v.length})${v.length && typeof v[0] === 'object' ? ' — chaves do [0]: ' + Object.keys(v[0]).slice(0, 25).join(',') : ''}`);
+      continue;
+    }
+    const ks = Object.keys(v);
+    log(`  [${key}] objeto — chaves (${ks.length}): ${ks.slice(0, 40).join(', ')}`);
+    // Dump completo se for pequeno (candidato forte a objeto de câmera)
+    if (ks.length <= 20) {
+      let s;
+      try { s = JSON.stringify(v); } catch (e) { s = '[circular]'; }
+      if (s && s.length <= 700) log(`     valor: ${s}`);
+    }
     const hits = findCameraSignals(v);
-    if (hits.length) {
-      anySignal = true;
-      log(`  ${key} → ${hits.slice(0, 12).join(' | ')}`);
-    }
-  }
-  if (!anySignal) log('  nenhum sinal de câmera (pitch/bearing/zoom/3d) em nenhuma chave.');
-
-  // 3. Retorno cru do getMapBounds — é o que alimenta o método geométrico
-  try {
-    const res = await rpc.invoke('getMapBounds', []);
-    const s = JSON.stringify(res);
-    log(`getMapBounds (${s.length} chars): ${s.slice(0, 900)}${s.length > 900 ? ' …[truncado]' : ''}`);
-    const ring = ringFromBounds(res);
-    if (ring) {
-      const ratio = trapezoidRatio(ring);
-      log(`  anel extraído: ${ring.length} pts | razão lados opostos: ${ratio ? ratio.toFixed(4) : 'n/d'}`);
-      log('  (retângulo ≈ 1.000 → planta; trapézio > 1.12 → perspectiva)');
-    } else {
-      log('  anel NÃO extraído — formato inesperado; o método geométrico não funciona com esta resposta.', true);
-    }
-  } catch (e) {
-    log('getMapBounds falhou: ' + e.message, true);
+    if (hits.length) log(`     ⇒ SINAIS: ${hits.slice(0, 15).join(' | ')}`);
   }
 
-  // 4. Outras funções que possam revelar a câmera
-  for (const fn of ['getMapStyle', 'getCameraPosition', 'getMapCamera', 'getView']) {
+  // ── 3. Varredura de RPCs que possam expor a câmera ──
+  const PROBE_RPCS = [
+    'getMapCamera', 'getCamera', 'getCameraPosition', 'getMapPitch',
+    'getMapZoom', 'getMapCenter', 'getMapBearing', 'getMapState',
+    'getViewport', 'getView', 'getCurrentView', 'getMapTransform',
+    'getMapCanvas', 'getMapSize', 'getMap',
+  ];
+  const okRpc = [];
+  for (const fn of PROBE_RPCS) {
     try {
       const r = await rpc.invoke(fn, []);
-      if (r == null) continue;
-      const hits = typeof r === 'object' ? findCameraSignals(r) : [];
-      log(`${fn}: ${hits.length ? hits.slice(0, 10).join(' | ') : 'sem sinais de câmera'}`);
-    } catch (e) { /* função inexistente */ }
+      if (r === undefined) continue;
+      let s;
+      try { s = JSON.stringify(r); } catch (e) { s = String(r); }
+      okRpc.push(fn);
+      log(`  rpc ${fn}() → ${(s || String(r)).slice(0, 400)}`);
+    } catch (e) { /* função inexistente — silencioso */ }
   }
-  log('══════ FIM DO DIAGNÓSTICO ══════');
+  if (!okRpc.length) log('  nenhum RPC de câmera respondeu.');
+
+  // ── 4. Referência: bounds + zoom (para heurística, se necessário) ──
+  try {
+    const res = await rpc.invoke('getMapBounds', []);
+    const ring = ringFromBounds(res);
+    const mv = giraffeState.get('mapView');
+    const zoom = typeof mv?.zoom === 'number' ? mv.zoom : null;
+    if (ring && zoom !== null) {
+      const lat0 = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+      const lngs = ring.map((p) => p[0]), lats = ring.map((p) => p[1]);
+      const dx = (Math.max(...lngs) - Math.min(...lngs)) * 111320 * Math.cos((lat0 * Math.PI) / 180);
+      const dy = (Math.max(...lats) - Math.min(...lats)) * 110574;
+      const resM = (156543.03392 * Math.cos((lat0 * Math.PI) / 180)) / Math.pow(2, zoom);
+      log(`  bbox: ${dx.toFixed(1)}m × ${dy.toFixed(1)}m | zoom ${zoom.toFixed(3)} | m/px ${resM.toFixed(4)}`);
+      log(`  bbox em px equivalentes: ${(dx / resM).toFixed(0)} × ${(dy / resM).toFixed(0)} (área ${((dx / resM) * (dy / resM) / 1000).toFixed(0)}k px²)`);
+    }
+  } catch (e) { /* ignorar */ }
+
+  log('══════ FIM ══════');
 };
 
 $('btnInspect').onclick = async () => {
