@@ -645,6 +645,9 @@ main {
       <button id="btnClear" class="btn-ghost" title="Remove labels criados por este app e fecha o popup" aria-label="Limpar anotações">
         Limpar
       </button>
+      <button id="btnClearPopup" class="btn-ghost" title="Remove o popup dos elementos selecionados — eles deixam de exibi-lo ao serem clicados" aria-label="Apagar popup da seleção">
+        Apagar Popup
+      </button>
     </div>
 
   </div>
@@ -701,7 +704,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V52 · © 2026 Königsberger Vannucchi
+  Beta V53 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -1076,7 +1079,9 @@ async function refreshPopupOnSelection(feats) {
     const title = getProp(f, 'name') || getProp(f, 'usage') || 'Feature';
     const html = buildPopupHtml(title, values);
     if (!html) return;
-    await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
+    // Sobe o popup até a cota da BASE do elemento
+    const baseH = (await resolveProps(f, ['baseHeight'])).baseHeight || 0;
+    await rpc.invoke('addHtmlPopup', [html, c, popupOptions(baseH)]);
   } catch (e) { /* popup indisponível — silencioso */ }
 }
 
@@ -1135,7 +1140,8 @@ async function applyPopups(features, propKeys) {
     if (!html) continue;
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
-      await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
+      const baseH = (await resolveProps(f, ['baseHeight'])).baseHeight || 0;
+      await rpc.invoke('addHtmlPopup', [html, c, popupOptions(baseH)]);
       const srcId = f.properties?.id || f.id;
       if (srcId) {
         popupRegistry.set(srcId, { propKeys });   // recalculado a cada clique
@@ -1695,10 +1701,68 @@ function viewportMetrics() {
   const mPerPx = (156543.03392 * cosLat) / Math.pow(2, mv.zoom);
   if (!isFinite(mPerPx) || mPerPx <= 0) return null;
 
-  const dx = ((east - west) * 111320 * cosLat) / mPerPx;
-  const dy = ((north - south) * 110574) / mPerPx;
+  const dxM = (east - west) * 111320 * cosLat;
+  const dyM = (north - south) * 110574;
+  const dx = dxM / mPerPx;
+  const dy = dyM / mPerPx;
   if (!isFinite(dx) || !isFinite(dy) || dx <= 0 || dy <= 0) return null;
-  return { dx, dy, area: dx * dy };
+  return { dx, dy, area: dx * dy, dxM, dyM, aspect: dxM / dyM };
+}
+
+/* ─── ELEVAÇÃO DO POPUP ATÉ A COTA DA BASE ─────────────────────────
+   O popup é ancorado por lng/lat e não tem componente de altura. Para
+   ele coincidir com a base do elemento (que pode estar elevada), há
+   que deslocá-lo em pixels na tela.
+
+   O deslocamento é (altura ÷ metros-por-pixel) × sen(pitch): em planta
+   é zero, porque a base projeta sobre o mesmo ponto; quanto mais
+   inclinada a câmera, maior.
+
+   O pitch não é exposto pelo SDK. Mas a inclinação estica a viewport na
+   vertical, e a razão de aspecto (largura ÷ altura em metros) mede esse
+   esticamento sem depender do zoom: em planta vale a proporção do
+   canvas, e cai conforme a câmera deita.
+
+   Como o popup passou a ser recalculado a cada clique, esse valor é
+   computado no momento em que você clica — e vale para aquele
+   enquadramento. Se depois mudar o zoom, o popup se acerta no próximo
+   clique, que é justamente o modelo que combinamos.                  */
+const ASPECT_PLAN_STORE = 'kv_annot_aspect_plan';
+let aspectPlan = parseFloat(localStorage.getItem(ASPECT_PLAN_STORE)) || null;
+
+function calibrateAspectPlan() {
+  const m = viewportMetrics();
+  if (!m || !isFinite(m.aspect) || m.aspect <= 0) return;
+  // O aspecto é máximo em planta — inclinar só reduz
+  if (aspectPlan === null || m.aspect > aspectPlan * 1.02) {
+    aspectPlan = m.aspect;
+    localStorage.setItem(ASPECT_PLAN_STORE, String(aspectPlan));
+  }
+}
+
+function popupPixelOffset(heightMeters) {
+  if (!heightMeters || !isFinite(heightMeters) || heightMeters <= 0) return null;
+  const m = viewportMetrics();
+  const canvasH = window.innerHeight;
+  if (!m || !aspectPlan || !canvasH || canvasH < 200) return null;
+
+  const k = Math.min(Math.max(aspectPlan / m.aspect, 1), 12);   // esticamento vertical
+  const sinPitch = k <= 1.02 ? 0 : Math.sqrt(Math.max(0, 1 - 1 / (k * k)));
+  if (sinPitch <= 0.02) return null;                            // praticamente em planta
+
+  const mPerPx = m.dyM / (canvasH * k);
+  if (!isFinite(mPerPx) || mPerPx <= 0) return null;
+
+  const px = (heightMeters / mPerPx) * sinPitch;
+  if (!isFinite(px) || px < 1) return null;
+  return [0, -Math.min(px, 2000)];                              // negativo sobe na tela
+}
+
+function popupOptions(baseHeightMeters) {
+  const opts = { closeButton: true, maxWidth: '320px', focusAfterOpen: false };
+  const off = popupPixelOffset(baseHeightMeters);
+  if (off) opts.offset = off;
+  return opts;
 }
 
 // Fixa a referência de planta (chamado quando o usuário escolhe 2D manual)
@@ -1767,6 +1831,7 @@ function evaluateViewMode() {
       setViewMode(flagMode, 'flag de modo do Giraffe');
       return;
     }
+    calibrateAspectPlan();
     // M2: área normalizada da viewport (método efetivo nesta versão)
     const m = modeFromViewport();
     if (m) {
@@ -2681,6 +2746,29 @@ $('btnDiagUndo').onclick = async () => {
     }
   }
   log('══════ FIM ══════');
+};
+
+$('btnClearPopup').onclick = async () => {
+  const feats = await readSelection();
+
+  // Fecha o popup que estiver na tela, de qualquer forma
+  try { await rpc.invoke('clearSDKPopup', []); } catch (e) {}
+  popupShownFor = null;
+
+  if (!feats.length) {
+    log('Nada selecionado — popup fechado. Selecione elementos para remover o popup deles.', true);
+    return;
+  }
+
+  let n = 0;
+  feats.forEach((f) => {
+    const id = f.properties?.id || f.id;
+    if (id && popupRegistry.delete(id)) n++;
+  });
+
+  log(n
+    ? `Popup removido de ${n} elemento(s) — não reaparece mais ao clicar neles.`
+    : 'Os elementos selecionados não tinham popup registrado (popup em tela foi fechado).');
 };
 
 $('btnInspect').onclick = async () => {
