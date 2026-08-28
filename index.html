@@ -600,7 +600,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V24
+  KV Arquitetos · Gerador de Anotações · Beta V25
 </footer>
 
 <script type="module">
@@ -1045,6 +1045,7 @@ async function buildLabelFeatures(features, propKeys) {
         // --- controle do app ---
         sp_tag: SP_TAG,
         sp_source: f.properties?.id || f.id || null,  // vínculo com a feature de origem
+        sp_srcAnchor: c,                               // centróide da origem nesta sincronização
         sp_props: propKeys,                            // quais propriedades sincronizar
         name: `kv_annot_${stamp}_${i + 1}`,            // único — não conflita com anteriores
       },
@@ -1095,7 +1096,7 @@ async function applyLabels(features, propKeys) {
   } catch (e) {
     log('createRawSections falhou: ' + e.message, true);
   } finally {
-    setTimeout(() => { isSelfWriting = false; }, 2500);
+    releaseSelfWriting();
   }
 }
 
@@ -1236,7 +1237,7 @@ async function applyViewModeToNivel(mode) {
   } catch (e) {
     log('Troca de modo dos símbolos falhou: ' + e.message, true);
   } finally {
-    setTimeout(() => { isSelfWriting = false; }, 2500);
+    releaseSelfWriting();
   }
 }
 
@@ -1362,6 +1363,7 @@ async function applyNivelLabels(features) {
         sp_kind: 'nivel',
         sp_view: mode,
         sp_source: f.properties?.id || f.id || null,
+        sp_srcAnchor: c,
         sp_props: ['nivelDoTopo'],
         name: `kv_nivel_${stamp}_${i + 1}`,
       },
@@ -1379,7 +1381,7 @@ async function applyNivelLabels(features) {
   } catch (e) {
     log('createRawSections (nível) falhou: ' + e.message, true);
   } finally {
-    setTimeout(() => { isSelfWriting = false; }, 2500);
+    releaseSelfWriting();
   }
 }
 
@@ -1450,10 +1452,66 @@ function getEvaluatedFeaturesMap() {
   return map;
 }
 
+/* =========================================================
+   DESLOCAMENTO RELATIVO — o ponto segue o MOVIMENTO da origem
+   em vez de "grudar" no centróide. Assim o deslocamento manual
+   feito pelo usuário (ex.: arrastar o rótulo para um canto do
+   edifício) é preservado: aplicamos ao ponto o mesmo vetor de
+   translação que a origem sofreu desde a última sincronização.
+
+   sp_srcAnchor guarda o centróide da origem na última sync.
+   delta = centróide atual − sp_srcAnchor  →  soma-se ao ponto.
+   Cobre translação; rotação/escala da origem não são rastreadas.
+   ========================================================= */
+const ANCHOR_EPS = 1e-12;
+
+function followSource(pt, src) {
+  const srcCentroid = centroid(src);
+  const anchor = Array.isArray(pt.properties?.sp_srcAnchor) ? pt.properties.sp_srcAnchor : null;
+  const cur = pt.geometry?.coordinates;
+
+  // Sem centróide resolvível — nada a fazer
+  if (!srcCentroid || !Array.isArray(cur)) {
+    return { geometry: pt.geometry, anchor, geomChanged: false, anchorChanged: false };
+  }
+
+  // Ponto legado (criado antes do sp_srcAnchor): adota a posição atual
+  // como referência e apenas grava a âncora — NÃO reposiciona.
+  if (!anchor) {
+    return { geometry: pt.geometry, anchor: srcCentroid, geomChanged: false, anchorChanged: true };
+  }
+
+  const dLng = srcCentroid[0] - anchor[0];
+  const dLat = srcCentroid[1] - anchor[1];
+
+  // Origem não se moveu — preserva a posição do ponto integralmente
+  // (inclusive qualquer arraste manual que o usuário tenha feito)
+  if (Math.abs(dLng) <= ANCHOR_EPS && Math.abs(dLat) <= ANCHOR_EPS) {
+    return { geometry: pt.geometry, anchor, geomChanged: false, anchorChanged: false };
+  }
+
+  // Origem se moveu — aplica o MESMO delta ao ponto, mantendo o
+  // deslocamento relativo (o rótulo continua no mesmo canto)
+  return {
+    geometry: { type: 'Point', coordinates: [cur[0] + dLng, cur[1] + dLat] },
+    anchor: srcCentroid,
+    geomChanged: true,
+    anchorChanged: true,
+  };
+}
+
 async function updatePoints(auto = false, scope = 'all') {
   // Lê direto de giraffeState.rawSections — inclui features em layers
   // ocultos (visibilidade é só de renderização, os dados continuam lá).
   const all = getRawSectionFeatures();
+
+  // ─── SAÍDA ANTECIPADA: sem pontos do app, nada a avaliar ───
+  // (feita ANTES das chamadas RPC caras — reduz a latência do auto-sync)
+  let points = all.filter((f) => f?.properties?.sp_tag === SP_TAG);
+  if (!points.length) {
+    if (!auto) log('Nenhum ponto do app encontrado para atualizar.', true);
+    return;
+  }
 
   // Índice de features por id (candidatas a origem)
   const byId = {};
@@ -1461,6 +1519,26 @@ async function updatePoints(auto = false, scope = 'all') {
     const id = f.id || f.properties?.id;
     if (id) byId[id] = f;
   });
+
+  // Seleção atual — lida UMA vez e reaproveitada (era chamada 2×)
+  const selFeats = await readSelection();
+  const selMap = {};
+  selFeats.forEach((f) => {
+    const id = f.id || f.properties?.id;
+    if (id) selMap[id] = f;
+  });
+
+  // Escopo "selecionados": pontos vinculados aos elementos selecionados
+  // OU os próprios pontos selecionados no mapa
+  if (scope === 'selected') {
+    const selIds = new Set(Object.keys(selMap));
+    if (!selIds.size) { log('Nada selecionado no mapa.', true); return; }
+    points = points.filter((pt) => {
+      const ptId = pt.id || pt.properties?.id;
+      return selIds.has(pt.properties.sp_source) || selIds.has(ptId);
+    });
+    if (!points.length) { log('Nenhum ponto do app vinculado à seleção atual.', true); return; }
+  }
 
   // Fontes AVALIADAS (com _height/_baseHeight de stack):
   // 1. giraffeState com chaves candidatas (varia por versão do SDK)
@@ -1470,57 +1548,34 @@ async function updatePoints(auto = false, scope = 'all') {
 
   // Fonte 2: evaluateFeatures — avalia os raw sem precisar de seleção.
   // Essencial para o auto-sync quando o usuário move sem selecionar.
-  if (!Object.keys(evalMap).length) {
+  // OTIMIZAÇÃO: avalia SÓ as origens realmente vinculadas a pontos,
+  // não o projeto inteiro — corta muito da latência em projetos grandes.
+  const neededIds = new Set(
+    points.map((pt) => pt.properties?.sp_source).filter(Boolean)
+  );
+  const missingEval = [...neededIds].filter((id) => !evalMap[id] && !selMap[id] && byId[id]);
+  if (missingEval.length) {
     try {
-      const rawFeats = Object.values(byId);
-      if (rawFeats.length) {
-        const evaluated = await rpc.invoke('evaluateFeatures', [rawFeats]);
-        if (evaluated && typeof evaluated === 'object') {
-          const feats = Array.isArray(evaluated) ? evaluated
-            : evaluated.features ? evaluated.features
-            : Object.values(evaluated);
-          feats.forEach((f) => {
-            if (!f) return;
-            const id = f.id || f.properties?.id;
-            if (id && !evalMap[id]) { evalMap[id] = f; evalSourceKey = 'evaluateFeatures'; }
-          });
-        }
+      const rawFeats = missingEval.map((id) => byId[id]);
+      const evaluated = await rpc.invoke('evaluateFeatures', [rawFeats]);
+      if (evaluated && typeof evaluated === 'object') {
+        const feats = Array.isArray(evaluated) ? evaluated
+          : evaluated.features ? evaluated.features
+          : Object.values(evaluated);
+        feats.forEach((f) => {
+          if (!f) return;
+          const id = f.id || f.properties?.id;
+          if (id && !evalMap[id]) { evalMap[id] = f; evalSourceKey = 'evaluateFeatures'; }
+        });
       }
     } catch (e) { /* evaluateFeatures indisponível nesta versão — ignorar */ }
   }
 
-  const selFeats = await readSelection();
-  const selMap = {};
-  selFeats.forEach((f) => {
-    const id = f.id || f.properties?.id;
-    if (id) selMap[id] = f;
-  });
   const resolveSrc = (id) => evalMap[id] || selMap[id] || byId[id] || null;
   if (!auto) {
     log(evalSourceKey
       ? `Fonte avaliada: '${evalSourceKey}'.`
       : 'Fonte avaliada indisponível — elementos com stack podem usar valores raw (selecione-os no mapa antes de atualizar para garantir cotas corretas).');
-  }
-
-  // Pontos criados por este app
-  let points = all.filter((f) => f?.properties?.sp_tag === SP_TAG);
-
-  // Escopo "selecionados": pontos vinculados aos elementos selecionados
-  // OU os próprios pontos selecionados no mapa
-  if (scope === 'selected') {
-    const sel = await readSelection();
-    const selIds = new Set(sel.map((f) => f.properties?.id || f.id).filter(Boolean));
-    if (!selIds.size) { log('Nada selecionado no mapa.', true); return; }
-    points = points.filter((pt) => {
-      const ptId = pt.id || pt.properties?.id;
-      return selIds.has(pt.properties.sp_source) || selIds.has(ptId);
-    });
-    if (!points.length) { log('Nenhum ponto do app vinculado à seleção atual.', true); return; }
-  }
-
-  if (!points.length) {
-    if (!auto) log('Nenhum ponto do app encontrado para atualizar.', true);
-    return;
   }
 
   // Modo de propriedades: originais da criação ou as marcadas no app agora
@@ -1563,13 +1618,12 @@ async function updatePoints(auto = false, scope = 'all') {
       const nvChanged = nv !== null && pt.properties.kv_nivelDoTopo !== nv;
       const elevChangedN =
         pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
-      // Verifica se centróide da origem mudou (elemento movido)
-      const newCentroidN = centroid(src);
-      const geomChangedN = newCentroidN && (
-        Math.abs(pt.geometry.coordinates[0] - newCentroidN[0]) > 1e-9 ||
-        Math.abs(pt.geometry.coordinates[1] - newCentroidN[1]) > 1e-9
-      );
-      if (!nvChanged && !elevChangedN && !geomChangedN) continue;
+
+      // Segue o deslocamento da origem preservando o arraste manual
+      const followN = followSource(pt, src);
+
+      if (!nvChanged && !elevChangedN && !followN.geomChanged && !followN.anchorChanged) continue;
+
       let pngUrlUpd;
       const ptMode = pt.properties.sp_view || '3d';
       try {
@@ -1580,17 +1634,15 @@ async function updatePoints(auto = false, scope = 'all') {
         log('Rasterização do símbolo falhou no update: ' + e.message, true);
         continue;
       }
-      const newGeomN = (geomChangedN && newCentroidN)
-        ? { type: 'Point', coordinates: newCentroidN }
-        : pt.geometry;
       toUpdate.push({
         ...pt,
-        geometry: newGeomN,
+        geometry: followN.geometry,
         properties: {
           ...pt.properties,
           kv_nivelDoTopo: nv !== null ? nv : pt.properties.kv_nivelDoTopo,
           baseHeight: topElevN,
           _baseHeight: topElevN,
+          sp_srcAnchor: followN.anchor,
           marker: {
             ...pt.properties.marker,
             value: {
@@ -1616,16 +1668,12 @@ async function updatePoints(auto = false, scope = 'all') {
     const elevChanged =
       pt.properties.baseHeight !== topElev || pt.properties._baseHeight !== topElev;
 
-    // Geometria: o ponto segue o centróide atual da origem.
-    // Esta é a linha que faz a anotação SEGUIR o elemento quando ele é movido.
-    const newCentroid = centroid(src);
-    const geomChanged = newCentroid && (
-      Math.abs(pt.geometry.coordinates[0] - newCentroid[0]) > 1e-9 ||
-      Math.abs(pt.geometry.coordinates[1] - newCentroid[1]) > 1e-9
-    );
-    const newGeometry = (geomChanged && newCentroid)
-      ? { type: 'Point', coordinates: newCentroid }
-      : pt.geometry;
+    // Geometria: o ponto segue o DESLOCAMENTO da origem, preservando
+    // qualquer reposicionamento manual (o rótulo fica no mesmo canto).
+    const follow = followSource(pt, src);
+    const newGeometry = follow.geometry;
+    const geomChanged = follow.geomChanged;
+    const anchorChanged = follow.anchorChanged;
 
     // TEXTO: respeita edições manuais no elemento. Como o texto usa
     // templates {{get(properties,'kv_X')}}, os VALORES exibidos atualizam
@@ -1660,9 +1708,9 @@ async function updatePoints(auto = false, scope = 'all') {
     const valuesChanged = Object.entries(copiedProps)
       .some(([k, v]) => pt.properties[k] !== v);
     const textChanged = newText !== currentText;
-    if (!valuesChanged && !textChanged && !elevChanged && !geomChanged) continue;
+    if (!valuesChanged && !textChanged && !elevChanged && !geomChanged && !anchorChanged) continue;
 
-    // Atualiza geometria (centróide da origem), elevação, valores kv_ e texto.
+    // Atualiza geometria (delta da origem), elevação, valores kv_ e texto.
     const updated = {
       ...pt,
       geometry: newGeometry,
@@ -1671,6 +1719,7 @@ async function updatePoints(auto = false, scope = 'all') {
         ...copiedProps,
         baseHeight: topElev,
         _baseHeight: topElev,
+        sp_srcAnchor: follow.anchor,
         ...(useAppProps ? { sp_props: propKeys } : {}),
         marker: {
           ...pt.properties.marker,
@@ -1705,7 +1754,7 @@ async function updatePoints(auto = false, scope = 'all') {
     log('updateRawSections falhou: ' + e.message, true);
   } finally {
     // Libera a flag após o eco do listener (a escrita dispara rawSections)
-    setTimeout(() => { isSelfWriting = false; }, 2500);
+    releaseSelfWriting();
   }
 }
 
@@ -1714,6 +1763,42 @@ async function updatePoints(auto = false, scope = 'all') {
    ========================================================= */
 let isSelfWriting = false;
 let syncTimer = null;
+let pendingSync = false;   // evento chegou durante nossa escrita — não perder
+let syncRunning = false;   // impede execuções concorrentes de updatePoints
+
+const SYNC_DEBOUNCE = 220;      // resposta mais fluida (era 800ms)
+const SELF_WRITE_WINDOW = 900;  // janela do eco da própria escrita
+
+// Agenda uma sincronização com debounce curto
+function scheduleSync() {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, SYNC_DEBOUNCE);
+}
+
+// Executa a sincronização em série; se chegou pedido durante a execução,
+// roda de novo ao terminar (não perde a última mudança do usuário).
+async function runSync() {
+  if (syncRunning) { pendingSync = true; return; }
+  syncRunning = true;
+  try {
+    await updatePoints(true);
+  } catch (e) {
+    log('Auto-sync: ' + e.message, true);
+  } finally {
+    syncRunning = false;
+    if (pendingSync) { pendingSync = false; scheduleSync(); }
+  }
+}
+
+// Libera a flag de auto-escrita e, se houve evento represado nesse
+// intervalo, dispara a sincronização — antes esses eventos eram
+// simplesmente descartados (causa das falhas intermitentes).
+function releaseSelfWriting(delay = SELF_WRITE_WINDOW) {
+  setTimeout(() => {
+    isSelfWriting = false;
+    if (pendingSync) { pendingSync = false; scheduleSync(); }
+  }, delay);
+}
 
 function setupAutoSync() {
   const chk = $('autoSync');
@@ -1726,9 +1811,11 @@ function setupAutoSync() {
   try {
     giraffeState.addListener(['rawSections'], () => {
       if (!$('autoSync').checked) return;
-      if (isSelfWriting) return;              // ignora eco da nossa própria escrita
-      clearTimeout(syncTimer);
-      syncTimer = setTimeout(() => updatePoints(true), 800);  // debounce
+      // Eco da nossa própria escrita: NÃO descarta — represa para rodar
+      // assim que a janela fechar. Sem isso, mudanças feitas logo após
+      // uma sincronização eram silenciosamente ignoradas.
+      if (isSelfWriting) { pendingSync = true; return; }
+      scheduleSync();
     });
     log('Listener de rawSections registrado (auto-sync).');
   } catch (e) {
@@ -1738,8 +1825,7 @@ function setupAutoSync() {
   // Mudança na cota base também dispara sincronização (Nível da Base/Topo)
   $('seaLevel').addEventListener('input', () => {
     if (!$('autoSync').checked) return;
-    clearTimeout(syncTimer);
-    syncTimer = setTimeout(() => updatePoints(true), 800);
+    scheduleSync();
   });
 }
 
