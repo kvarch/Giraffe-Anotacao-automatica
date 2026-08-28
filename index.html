@@ -682,7 +682,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V39 · © 2026 Königsberger Vannucchi
+  Beta V42 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -987,20 +987,11 @@ function setupSelectionListener() {
       giraffeState.addListener([key], async () => {
         const feats = await readSelection();
         updateSelStatus(feats);
-        // Reexibe popup registrado se o elemento de origem for reselecionado
-        if (feats.length === 1) {
-          const srcId = feats[0].properties?.id || feats[0].id;
-          const saved = srcId ? popupRegistry.get(srcId) : null;
-          if (saved) {
-            try {
-              await rpc.invoke('addHtmlPopup', [
-              saved.html, saved.location, popupOptions(saved.topH),
-            ]);
-            lastPopup = saved;
-            lastPopupOffset = null;
-            } catch (e) { /* silencioso */ }
-          }
-        }
+        // NOTA: até a v41 o app reexibia aqui o popup registrado quando o
+        // elemento de origem era reselecionado. Cada addHtmlPopup cria um
+        // passo no "desfazer" do Giraffe, então simplesmente navegar pelo
+        // projeto entupia o histórico. O popup agora só é criado quando
+        // você clica em Aplicar Anotações.
       });
     } catch (e) {
       // chave inexistente nesta versão — ignorar silenciosamente
@@ -1149,22 +1140,18 @@ function sinPitchEstimate() {
   return Math.sqrt(Math.max(0, 1 - 1 / (k * k)));
 }
 
-function popupPixelOffset(heightMeters) {
-  if (!heightMeters || !isFinite(heightMeters) || heightMeters <= 0) return null;
-  const mPerPx = metersPerPixel();
-  if (!mPerPx) return null;
-  const sinPitch = sinPitchEstimate();
-  if (sinPitch <= 0.02) return null;   // praticamente em planta — sem deslocamento
-  const px = (heightMeters / mPerPx) * sinPitch;
-  if (!isFinite(px) || px < 1) return null;
-  return [0, -Math.min(px, POPUP_MAX_OFFSET_PX)];   // negativo = sobe na tela
-}
+/* O popup do Mapbox é ancorado por lng/lat e NÃO tem componente de
+   altura. Elevá-lo até o topo exigia um deslocamento em pixels que
+   depende do zoom e da inclinação — ou seja, teria de ser reescrito a
+   cada movimento de câmera. E cada reescrita (addHtmlPopup) cria um
+   passo no "desfazer" do Giraffe, o que quebrava o Ctrl+Z.
 
-function popupOptions(heightMeters) {
-  const opts = { closeButton: true, maxWidth: '320px' };
-  const off = popupPixelOffset(heightMeters);
-  if (off) opts.offset = off;
-  return opts;
+   Por isso o popup é ancorado no CENTRO do elemento, igual em 2D e 3D:
+   uma posição fixa no mundo, que não precisa de recálculo nenhum. O
+   addHtmlPopup passa a ser chamado uma única vez, quando você clica em
+   Aplicar — e o histórico de desfazer fica limpo. */
+function popupOptions() {
+  return { closeButton: true, maxWidth: '320px' };
 }
 
 async function applyPopups(features, propKeys) {
@@ -1179,100 +1166,19 @@ async function applyPopups(features, propKeys) {
     const html = buildPopupHtml(title, values);
     if (!html) continue;
 
-    // Altura do topo da origem — define o quanto o popup sobe na tela
-    const topH = (await resolveProps(f, ['height'])).height || 0;
-
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
-      await rpc.invoke('addHtmlPopup', [html, c, popupOptions(topH)]);
+      // Uma única chamada por feature — ver nota sobre o desfazer acima.
+      await rpc.invoke('addHtmlPopup', [html, c, popupOptions()]);
       const srcId = f.properties?.id || f.id;
-      const entry = { location: c, html, topH, srcId, propKeys };
-      if (srcId) popupRegistry.set(srcId, entry);
-      lastPopup = entry;
-      lastPopupOffset = null;
-      log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]${topH ? ` — elevado ao topo (${topH} m)` : ''}`);
-      try {
-        suppressViewSwitchUntil = Date.now() + 2500;
-        await rpc.invoke('flyTo', [{ center: c, duration: 800 }]);
-      } catch (e) {}
+      if (srcId) popupRegistry.set(srcId, { location: c, html, srcId, propKeys });
+      log(`Popup criado no centro do elemento [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
       count++;
     } catch (e) {
       log('addHtmlPopup falhou: ' + e.message, true);
     }
   }
   log(`Popup(s) aplicado(s): ${count}${count > 1 ? ' (apenas o último permanece visível — limitação do SDK)' : ''}`);
-}
-
-/* ─── REPOSICIONAMENTO DO POPUP ────────────────────────────────────
-   O deslocamento é em pixels, logo depende do zoom e da inclinação:
-   precisa ser recalculado sempre que a câmera muda. E como o popup é
-   ancorado numa coordenada fixa, também precisa ser refeito quando a
-   geometria de origem se move.
-
-   Guardamos sp_source para recalcular centróide e altura a partir da
-   origem atual, em vez de reutilizar valores obsoletos.                */
-let lastPopup = null;          // { location, html, topH, srcId, title, propKeys }
-let lastPopupOffset = null;
-let popupReposTimer = null;
-let popupRepositioning = false;
-
-async function repositionPopup(recomputeFromSource) {
-  if (!lastPopup || popupRepositioning) return;
-
-  // Se a origem se moveu ou mudou de altura, recalcula posição e conteúdo
-  if (recomputeFromSource && lastPopup.srcId) {
-    const src = getRawSectionFeatures().find(
-      (f) => (f.id || f.properties?.id) === lastPopup.srcId
-    );
-    if (src) {
-      const c = centroid(src);
-      if (c) lastPopup.location = c;
-      const h = (await resolveProps(src, ['height'])).height || 0;
-      lastPopup.topH = h;
-      if (Array.isArray(lastPopup.propKeys) && lastPopup.propKeys.length) {
-        const values = await resolveProps(src, lastPopup.propKeys);
-        const title = getProp(src, 'name') || getProp(src, 'usage') || 'Feature';
-        const html = buildPopupHtml(title, values);
-        if (html) lastPopup.html = html;
-      }
-    }
-  }
-
-  const off = popupPixelOffset(lastPopup.topH);
-  const y = off ? off[1] : 0;
-
-  // Só reescreve se algo mudou de fato — evita piscar sem necessidade
-  if (!recomputeFromSource && lastPopupOffset !== null && Math.abs(y - lastPopupOffset) < 2) return;
-  lastPopupOffset = y;
-
-  popupRepositioning = true;
-  try {
-    await rpc.invoke('addHtmlPopup', [
-      lastPopup.html, lastPopup.location, popupOptions(lastPopup.topH),
-    ]);
-    if (lastPopup.srcId) {
-      popupRegistry.set(lastPopup.srcId, { ...lastPopup });
-    }
-  } catch (e) {
-    lastPopup = null;   // popup foi fechado — para de tentar
-  } finally {
-    popupRepositioning = false;
-  }
-}
-
-// Câmera mudou (zoom, pan, inclinação) — recalcula o offset em pixels
-function schedulePopupReposition() {
-  if (!lastPopup || !lastPopup.topH) return;
-  clearTimeout(popupReposTimer);
-  popupReposTimer = setTimeout(() => repositionPopup(false), 120);
-}
-
-// Geometria de origem mudou — recalcula posição, altura e conteúdo
-let popupSrcTimer = null;
-function schedulePopupFollowSource() {
-  if (!lastPopup || !lastPopup.srcId) return;
-  clearTimeout(popupSrcTimer);
-  popupSrcTimer = setTimeout(() => repositionPopup(true), 250);
 }
 
 /* =========================================================
@@ -1918,10 +1824,7 @@ function evaluateViewMode() {
 function setupViewModeDetection() {
   // mapView muda a cada movimento de câmera — reação imediata, sem polling
   try {
-    giraffeState.addListener(['mapView'], () => {
-      evaluateViewMode();
-      schedulePopupReposition();   // popup elevado depende de zoom e inclinação
-    });
+    giraffeState.addListener(['mapView'], () => evaluateViewMode());
     log('Detecção de vista ativa (giraffeState.mapView).');
   } catch (e) {
     log('Falha ao registrar listener de mapView: ' + e.message, true);
@@ -2062,7 +1965,6 @@ $('btnApply').onclick = async () => {
 
 $('btnClear').onclick = async () => {
   try { await rpc.invoke('clearSDKPopup', []); } catch (e) {}
-  lastPopup = null;
   const n = await deleteTaggedSections();
   log(`Limpeza concluída (${n} label(s) removidos, popup fechado).`);
 };
@@ -2515,7 +2417,6 @@ function setupAutoSync() {
 
   try {
     giraffeState.addListener(['rawSections'], () => {
-      schedulePopupFollowSource();   // popup segue a origem, mesmo sem auto-sync
       if (!$('autoSync').checked) return;
       // Eco da nossa própria escrita: NÃO descarta — represa para rodar
       // assim que a janela fechar. Sem isso, mudanças feitas logo após
