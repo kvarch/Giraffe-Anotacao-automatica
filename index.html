@@ -608,6 +608,11 @@ main {
         <input type="checkbox" id="autoSync" />
         <span>Sincronização automática <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(atualiza labels quando a origem mudar)</span></span>
       </label>
+
+      <label class="kv-check-label">
+        <input type="checkbox" id="pauseWrites" />
+        <span>Pausar escritas do app <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(teste: o app não grava nada no projeto por conta própria)</span></span>
+      </label>
     </section>
 
     <!-- AÇÕES -->
@@ -660,6 +665,9 @@ main {
         <button id="btnDiagView" class="btn-ghost" title="Despeja no log tudo que o SDK expõe sobre a câmera — use para calibrar a detecção Auto 2D/3D" aria-label="Diagnóstico da detecção de vista">
           Diag. Vista
         </button>
+        <button id="btnDiagUndo" class="btn-ghost" title="Procura no SDK funções de controle do histórico (transações, agrupamento, escrita silenciosa)" aria-label="Sondar API de histórico">
+          Sondar Histórico
+        </button>
       </div>
       <p class="kv-helper" style="margin-top:8px;margin-bottom:0">
         <strong>Inspecionar</strong> mostra as propriedades brutas da seleção.
@@ -682,7 +690,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V45 · © 2026 Königsberger Vannucchi
+  Beta V47 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -722,6 +730,7 @@ function saveUiState() {
     seaLevel: $('seaLevel').value,
     textSize: $('textSize').value,
     updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
+    pauseWrites: $('pauseWrites').checked,
     symMode: symbolModeSetting(),
   };
   localStorage.setItem(UI_STORE, JSON.stringify(state));
@@ -740,6 +749,7 @@ function restoreUiState() {
   if (typeof state.outPopup === 'boolean') $('outPopup').checked = state.outPopup;
   if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
   if (typeof state.outNivel === 'boolean') $('outNivel').checked = state.outNivel;
+  if (typeof state.pauseWrites === 'boolean') $('pauseWrites').checked = state.pauseWrites;
   if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
   if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
@@ -1675,7 +1685,7 @@ function setViewMode(mode, why) {
   if (!mode || mode === currentViewMode) return;
   currentViewMode = mode;
   log(`Vista: ${mode.toUpperCase()} (${why}).`);
-  if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
+  if (symbolModeSetting() === 'auto' && !writesPaused()) applyViewModeToNivel(mode);
 }
 
 let evaluating = false;
@@ -2234,6 +2244,7 @@ function scheduleSync() {
 // Executa a sincronização em série; se chegou pedido durante a execução,
 // roda de novo ao terminar (não perde a última mudança do usuário).
 async function runSync() {
+  if (writesPaused()) return;           // diagnóstico: nenhuma escrita automática
   if (syncRunning) { pendingSync = true; return; }
   syncRunning = true;
   try {
@@ -2254,6 +2265,16 @@ function releaseSelfWriting(delay = SELF_WRITE_WINDOW) {
     isSelfWriting = false;
     if (pendingSync) { pendingSync = false; scheduleSync(); }
   }, delay);
+}
+
+/* Interruptor de diagnóstico: com ele ligado o app NÃO grava nada por
+   conta própria — nem sincronização automática, nem troca de símbolo.
+   Serve para verificar se as escritas do app são mesmo a causa do
+   comportamento estranho do "desfazer". Desligado (padrão), o app se
+   comporta exatamente como antes. */
+function writesPaused() {
+  const el = document.getElementById('pauseWrites');
+  return !!(el && el.checked);
 }
 
 function setupAutoSync() {
@@ -2420,6 +2441,75 @@ $('btnDiagView').onclick = async () => {
     }
   } catch (e) { /* ignorar */ }
 
+  log('══════ FIM ══════');
+};
+
+
+/* =========================================================
+   SONDAGEM DA API DE HISTÓRICO
+   A documentação do SDK não menciona controle de "desfazer", mas ela já
+   se mostrou incompleta neste projeto (mapView não estava listado e foi
+   o que resolveu a detecção de vista). Aqui varremos a build real em
+   busca de qualquer função de transação, agrupamento ou escrita
+   silenciosa que permita separar as gravações do app das do usuário.
+   ========================================================= */
+$('btnDiagUndo').onclick = async () => {
+  log('══════ SONDAGEM DA API DE HISTÓRICO ══════');
+
+  // 1. O que o objeto rpc expõe
+  try {
+    const own = Object.keys(rpc || {});
+    const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(rpc) || {});
+    log(`rpc — próprias (${own.length}): ${own.join(', ') || '—'}`);
+    log(`rpc — protótipo (${proto.length}): ${proto.join(', ') || '—'}`);
+  } catch (e) { log('não foi possível inspecionar rpc: ' + e.message, true); }
+
+  // 2. O que giraffeState expõe
+  try {
+    const own = Object.keys(giraffeState || {});
+    const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(giraffeState) || {});
+    log(`giraffeState — próprias (${own.length}): ${own.join(', ') || '—'}`);
+    log(`giraffeState — protótipo (${proto.length}): ${proto.join(', ') || '—'}`);
+  } catch (e) { /* ignorar */ }
+
+  // 3. Nomes plausíveis de controle de histórico
+  const CANDIDATES = [
+    'undo', 'redo', 'canUndo', 'canRedo', 'getHistory', 'clearHistory',
+    'beginUndoGroup', 'endUndoGroup', 'beginTransaction', 'endTransaction',
+    'startBatch', 'endBatch', 'batchUpdate', 'withoutUndo', 'silentUpdate',
+    'setUndoEnabled', 'disableUndo', 'enableUndo', 'pauseHistory',
+    'resumeHistory', 'setHistoryEnabled', 'suppressHistory',
+    'updateRawSectionsSilent', 'patchRawSections', 'setRawSections',
+  ];
+  const found = [];
+  for (const name of CANDIDATES) {
+    try {
+      // Invocação sem argumentos: se a função não existir, o SDK costuma
+      // rejeitar com mensagem específica; qualquer outro erro indica que
+      // ela EXISTE mas exigia parâmetros.
+      const r = await rpc.invoke(name, []);
+      found.push(`${name} → respondeu (${JSON.stringify(r)?.slice(0, 80)})`);
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      const unknown = /unknown|not a function|no such|não|invalid function|unsupported/i.test(msg);
+      if (!unknown) found.push(`${name} → EXISTE (erro de parâmetro: ${msg.slice(0, 90)})`);
+    }
+  }
+  if (found.length) found.forEach((f) => log('  ' + f));
+  else log('  nenhuma função de controle de histórico respondeu.');
+
+  // 4. Variantes de escrita, para comparar custo no histórico
+  log('Variantes de escrita disponíveis para teste:');
+  for (const name of ['updateRawSection', 'updateRawSections', 'importRawSections', 'patchProperties']) {
+    try {
+      await rpc.invoke(name, []);
+      log(`  ${name} → aceitou chamada vazia`);
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      const unknown = /unknown|not a function|no such/i.test(msg);
+      log(`  ${name} → ${unknown ? 'não existe' : 'existe'}`);
+    }
+  }
   log('══════ FIM ══════');
 };
 
