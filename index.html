@@ -609,10 +609,6 @@ main {
         <span>Sincronização automática <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(atualiza labels quando a origem mudar)</span></span>
       </label>
 
-      <label class="kv-check-label">
-        <input type="checkbox" id="pauseWrites" />
-        <span>Pausar escritas do app <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(teste: o app não grava nada no projeto por conta própria)</span></span>
-      </label>
     </section>
 
     <!-- AÇÕES -->
@@ -705,7 +701,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V50 · © 2026 Königsberger Vannucchi
+  Beta V52 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -721,7 +717,7 @@ const DEFAULT_PROPS = [
   { key: 'levels',       label: 'Levels (pavimentos)',    pt: 'Pavimentos',    def: true  },
   { key: 'usage',        label: 'Usage (uso)',            pt: 'Uso',           def: false },
   { key: 'area',         label: 'Area (m²)',              pt: 'Área',          def: false },
-  { key: 'height',       label: 'Height (m)',             pt: 'Altura',        def: false },
+  { key: 'height',       label: 'Altura do Elemento (piso a piso × pavimentos)', pt: 'Altura', def: false },
   { key: 'name',         label: 'Name (nome)',            pt: 'Nome',          def: false },
   { key: 'floorToFloor', label: 'Floor to Floor',         pt: 'Piso a Piso',   def: true  },
   { key: 'baseHeight',   label: 'Base Height (altura na base)', pt: 'Altura na Base', def: false },
@@ -745,7 +741,6 @@ function saveUiState() {
     seaLevel: $('seaLevel').value,
     textSize: $('textSize').value,
     updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
-    pauseWrites: $('pauseWrites').checked,
     symMode: symbolModeSetting(),
   };
   localStorage.setItem(UI_STORE, JSON.stringify(state));
@@ -764,7 +759,6 @@ function restoreUiState() {
   if (typeof state.outPopup === 'boolean') $('outPopup').checked = state.outPopup;
   if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
   if (typeof state.outNivel === 'boolean') $('outNivel').checked = state.outNivel;
-  if (typeof state.pauseWrites === 'boolean') $('pauseWrites').checked = state.pauseWrites;
   if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
   if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
@@ -940,9 +934,27 @@ async function resolveProps(feature, keys) {
 
   const cotaBase = () => parseFloat($('seaLevel').value) || 0;
 
+  // Altura do PRÓPRIO elemento (corpo), sem a base e sem a cota do mar:
+  // height bruto, ou pavimentos × piso a piso.
+  const resolveBodyHeight = () => {
+    let h = getProp(feature, 'height');
+    if (h !== null) return h;
+    const lv = Number(p.levels), ff = Number(p.floorToFloor);
+    if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) {
+      return Math.round(lv * ff * 100) / 100;
+    }
+    // Sem corpo declarado: deriva do topo avaliado menos a base
+    const t = resolveTopHeight(), b = resolveBaseHeight();
+    if (t !== null && b !== null) {
+      const d = Math.round((t - b) * 100) / 100;
+      if (d > 0) return d;
+    }
+    return null;
+  };
+
   for (const k of keys) {
     if (k === 'height') {
-      out[k] = resolveTopHeight();                        // Altura = top height
+      out[k] = resolveBodyHeight();                       // altura do elemento (corpo)
     } else if (k === 'alturaDoTopo') {
       out[k] = resolveTopHeight();                        // topo absoluto, SEM a cota do mar
     } else if (k === 'baseHeight') {
@@ -1012,16 +1024,7 @@ function setupSelectionListener() {
       giraffeState.addListener([key], async () => {
         const feats = await readSelection();
         updateSelStatus(feats);
-        // Reexibe popup registrado se o elemento de origem for reselecionado
-        if (feats.length === 1) {
-          const srcId = feats[0].properties?.id || feats[0].id;
-          const saved = srcId ? popupRegistry.get(srcId) : null;
-          if (saved) {
-            try {
-              await rpc.invoke('addHtmlPopup', [saved.html, saved.location, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
-            } catch (e) { /* silencioso */ }
-          }
-        }
+        await refreshPopupOnSelection(feats);
       });
     } catch (e) {
       // chave inexistente nesta versão — ignorar silenciosamente
@@ -1036,7 +1039,46 @@ function setupSelectionListener() {
    registro em memória e reexibimos quando o elemento de origem
    for selecionado de novo (enquanto o app estiver aberto).
    ========================================================= */
-const popupRegistry = new Map();   // sourceId -> { location, html }
+const popupRegistry = new Map();   // sourceId -> { propKeys, title }
+
+/* ─── POPUP SINCRONIZADO NO CLIQUE ─────────────────────────────────
+   O popup do Mapbox é ancorado numa coordenada fixa e não tem como
+   acompanhar o elemento sozinho. Em vez de reescrevê-lo a cada
+   movimento — o que exigiria muitas chamadas —, ele é RECALCULADO
+   quando você volta a clicar no elemento: posição, valores e texto
+   saem do estado atual da origem naquele instante.
+
+   Assim você move o elemento à vontade sem nada acontecer, e o popup
+   se acerta no próximo clique.                                       */
+let popupShownFor = null;   // evita repetir a exibição no mesmo elemento
+
+async function refreshPopupOnSelection(feats) {
+  // Seleção múltipla ou vazia: libera para reexibir no próximo clique
+  if (!feats || feats.length !== 1) { popupShownFor = null; return; }
+
+  const f = feats[0];
+  const srcId = f.properties?.id || f.id;
+  if (!srcId) { popupShownFor = null; return; }
+
+  const saved = popupRegistry.get(srcId);
+  if (!saved) { popupShownFor = null; return; }
+
+  // O listener dispara por várias chaves candidatas; sem isto o mesmo
+  // clique geraria chamadas repetidas.
+  if (popupShownFor === srcId) return;
+  popupShownFor = srcId;
+
+  try {
+    // Recalcula a partir da origem ATUAL — é aqui que o popup sincroniza
+    const c = centroid(f);
+    if (!c) return;
+    const values = await resolveProps(f, saved.propKeys || []);
+    const title = getProp(f, 'name') || getProp(f, 'usage') || 'Feature';
+    const html = buildPopupHtml(title, values);
+    if (!html) return;
+    await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
+  } catch (e) { /* popup indisponível — silencioso */ }
+}
 
 function buildPopupHtml(title, values) {
   const rows = Object.entries(values)
@@ -1095,7 +1137,10 @@ async function applyPopups(features, propKeys) {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
       await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px', focusAfterOpen: false }]);
       const srcId = f.properties?.id || f.id;
-      if (srcId) popupRegistry.set(srcId, { location: c, html });
+      if (srcId) {
+        popupRegistry.set(srcId, { propKeys });   // recalculado a cada clique
+        popupShownFor = srcId;                    // já está na tela agora
+      }
       log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
       try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
@@ -1143,7 +1188,7 @@ async function buildLabelFeatures(features, propKeys) {
 
     // Eleva o ponto ao topo do elemento: baseHeight do ponto = topHeight
     // da origem (coordenada do arquivo, sem a cota base, que é só exibição)
-    const topElev = (await resolveProps(f, ['height'])).height || 0;
+    const topElev = (await resolveProps(f, ['alturaDoTopo'])).alturaDoTopo || 0;
 
     out.push({
       type: 'Feature',
@@ -1702,7 +1747,7 @@ function setViewMode(mode, why) {
   if (!mode || mode === currentViewMode) return;
   currentViewMode = mode;
   log(`Vista: ${mode.toUpperCase()} (${why}).`);
-  if (symbolModeSetting() === 'auto' && !writesPaused()) applyViewModeToNivel(mode);
+  if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
 }
 
 let evaluating = false;
@@ -1769,7 +1814,7 @@ async function applyNivelLabels(features) {
     const values = await resolveProps(f, ['nivelDoTopo']);
     const nv = values.nivelDoTopo;
     if (nv === null || nv === undefined) continue;
-    const topElev = (await resolveProps(f, ['height'])).height || 0;
+    const topElev = (await resolveProps(f, ['alturaDoTopo'])).alturaDoTopo || 0;
 
     let pngUrl;
     const mode = effectiveMode();
@@ -1878,6 +1923,9 @@ $('btnApply').onclick = async () => {
 
 $('btnClear').onclick = async () => {
   try { await rpc.invoke('clearSDKPopup', []); } catch (e) {}
+  // Sem isto, o popup voltaria a aparecer ao clicar no elemento de novo
+  popupRegistry.clear();
+  popupShownFor = null;
   const n = await deleteTaggedSections();
   log(`Limpeza concluída (${n} label(s) removidos, popup fechado).`);
 };
@@ -2136,7 +2184,7 @@ async function updatePoints(auto = false, scope = 'all') {
     if (pt.properties.sp_kind === 'nivel') {
       const nv = (await resolveProps(src, ['nivelDoTopo'])).nivelDoTopo;
       const topElevN = srcIsEvaluated
-        ? ((await resolveProps(src, ['height'])).height || 0)
+        ? ((await resolveProps(src, ['alturaDoTopo'])).alturaDoTopo || 0)
         : pt.properties.baseHeight;  // preserva cota quando não avaliado
       const nvChanged = nv !== null && pt.properties.kv_nivelDoTopo !== nv;
       const elevChangedN =
@@ -2209,7 +2257,7 @@ async function updatePoints(auto = false, scope = 'all') {
     // Se srcIsEvaluated, usa a cota avaliada; se não, preserva a existente
     // (evita sobrescrever com valor raw incorreto em elementos com stack).
     const topElev = srcIsEvaluated
-      ? ((await resolveProps(src, ['height'])).height || 0)
+      ? ((await resolveProps(src, ['alturaDoTopo'])).alturaDoTopo || 0)
       : pt.properties.baseHeight;  // preserva cota existente quando não avaliado
     const elevChanged =
       pt.properties.baseHeight !== topElev || pt.properties._baseHeight !== topElev;
@@ -2363,7 +2411,6 @@ function scheduleSync() {
 // Executa a sincronização em série; se chegou pedido durante a execução,
 // roda de novo ao terminar (não perde a última mudança do usuário).
 async function runSync() {
-  if (writesPaused()) return;           // diagnóstico: nenhuma escrita automática
   if (syncRunning) { pendingSync = true; return; }
   syncRunning = true;
   if (syncMark) syncMark.tRun = performance.now();
@@ -2395,16 +2442,6 @@ function releaseSelfWriting(delay = SELF_WRITE_WINDOW) {
     isSelfWriting = false;
     if (pendingSync) { pendingSync = false; scheduleSync(); }
   }, delay);
-}
-
-/* Interruptor de diagnóstico: com ele ligado o app NÃO grava nada por
-   conta própria — nem sincronização automática, nem troca de símbolo.
-   Serve para verificar se as escritas do app são mesmo a causa do
-   comportamento estranho do "desfazer". Desligado (padrão), o app se
-   comporta exatamente como antes. */
-function writesPaused() {
-  const el = document.getElementById('pauseWrites');
-  return !!(el && el.checked);
 }
 
 function setupAutoSync() {
