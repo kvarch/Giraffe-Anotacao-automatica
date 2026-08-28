@@ -682,7 +682,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V36 · © 2026 Königsberger Vannucchi
+  Beta V37 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -997,6 +997,7 @@ function setupSelectionListener() {
               saved.html, saved.location, popupOptions(saved.topH, saved.location[1]),
             ]);
             lastPopup = saved;
+            lastPopupOffset = null;
             } catch (e) { /* silencioso */ }
           }
         }
@@ -1092,30 +1093,55 @@ function buildPopupHtml(title, values) {
    a câmera deita. Aproximação, mas monotônica e bem comportada.
    ========================================================= */
 
-// O zoom de mapView está 2 níveis abaixo da convenção Mapbox — verificado
-// contra a bbox no diagnóstico da v28 (342px medidos ↔ canvas de ~1368px).
-const MAPVIEW_ZOOM_OFFSET = 2;
+// ── Escala real do mapa ──────────────────────────────────────────────
+// O zoom de mapView não está na convenção Mapbox (a bbox medida dava
+// 342px onde o canvas tem ~1368px). Em vez de assumir o fator, ele é
+// APRENDIDO: em vista de planta, a altura da bbox em metros dividida
+// pela altura do canvas dá os metros-por-pixel reais. O iframe ocupa a
+// altura da janela, então window.innerHeight aproxima bem o canvas.
+const ZOOM_FACTOR_STORE = 'kv_annot_zoom_factor';
+let zoomScaleFactor = parseFloat(localStorage.getItem(ZOOM_FACTOR_STORE)) || 4;
 const POPUP_MAX_OFFSET_PX = 2000;
 
-function popupPixelOffset(heightMeters, lat) {
-  if (!heightMeters || !isFinite(heightMeters) || heightMeters <= 0) return null;
+function calibrateZoomFactor() {
+  const m = viewportMetrics();
+  if (!m || !planAreaPx) return;
+  if (m.area > planAreaPx * 1.05) return;      // só calibra em planta
+  const h = window.innerHeight;
+  if (!h || h < 200) return;
+  const f = m.dy / h;                          // dy está na escala "crua" do zoom
+  if (!isFinite(f) || f <= 0.05 || f > 20) return;
+  const inv = 1 / f;
+  if (Math.abs(inv - zoomScaleFactor) < 0.05) return;
+  zoomScaleFactor = inv;
+  localStorage.setItem(ZOOM_FACTOR_STORE, String(inv));
+}
+
+// Metros por pixel reais na tela
+function metersPerPixel(lat) {
   let mv;
   try { mv = giraffeState.get('mapView'); } catch (e) { return null; }
   if (!mv || typeof mv.zoom !== 'number') return null;
-
   const cosLat = Math.cos((lat * Math.PI) / 180);
-  const mPerPx = (156543.03392 * cosLat) / Math.pow(2, mv.zoom + MAPVIEW_ZOOM_OFFSET);
-  if (!isFinite(mPerPx) || mPerPx <= 0) return null;
+  const raw = (156543.03392 * cosLat) / Math.pow(2, mv.zoom);
+  const v = raw / zoomScaleFactor;
+  return isFinite(v) && v > 0 ? v : null;
+}
 
-  // sen(pitch) estimado pela expansão da viewport
-  let sinPitch = 0;
+// sen(pitch) estimado pela expansão da viewport (ver v29/v36)
+function sinPitchEstimate() {
   const m = viewportMetrics();
-  if (m && planAreaPx) {
-    const r = Math.max(1, m.area / planAreaPx);
-    sinPitch = Math.sqrt(Math.max(0, 1 - 1 / (r * r)));
-  }
-  if (sinPitch <= 0.02) return null;   // praticamente em planta — sem deslocamento
+  if (!m || !planAreaPx) return 0;
+  const r = Math.max(1, m.area / planAreaPx);
+  return Math.sqrt(Math.max(0, 1 - 1 / (r * r)));
+}
 
+function popupPixelOffset(heightMeters, lat) {
+  if (!heightMeters || !isFinite(heightMeters) || heightMeters <= 0) return null;
+  const mPerPx = metersPerPixel(lat);
+  if (!mPerPx) return null;
+  const sinPitch = sinPitchEstimate();
+  if (sinPitch <= 0.02) return null;   // praticamente em planta — sem deslocamento
   const px = (heightMeters / mPerPx) * sinPitch;
   if (!isFinite(px) || px < 1) return null;
   return [0, -Math.min(px, POPUP_MAX_OFFSET_PX)];   // negativo = sobe na tela
@@ -1147,8 +1173,10 @@ async function applyPopups(features, propKeys) {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
       await rpc.invoke('addHtmlPopup', [html, c, popupOptions(topH, c[1])]);
       const srcId = f.properties?.id || f.id;
-      if (srcId) popupRegistry.set(srcId, { location: c, html, topH });
-      lastPopup = { location: c, html, topH };
+      const entry = { location: c, html, topH, srcId, propKeys };
+      if (srcId) popupRegistry.set(srcId, entry);
+      lastPopup = entry;
+      lastPopupOffset = null;
       log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]${topH ? ` — elevado ao topo (${topH} m)` : ''}`);
       try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
@@ -1159,27 +1187,76 @@ async function applyPopups(features, propKeys) {
   log(`Popup(s) aplicado(s): ${count}${count > 1 ? ' (apenas o último permanece visível — limitação do SDK)' : ''}`);
 }
 
-/* Reposiciona o popup ativo quando a câmera muda — o deslocamento em
-   pixels depende do zoom e da inclinação, então precisa ser recalculado.
-   Só reescreve quando a diferença é perceptível, para não piscar. */
-let lastPopup = null;
-let lastPopupOffset = 0;
-let popupReposTimer = null;
+/* ─── REPOSICIONAMENTO DO POPUP ────────────────────────────────────
+   O deslocamento é em pixels, logo depende do zoom e da inclinação:
+   precisa ser recalculado sempre que a câmera muda. E como o popup é
+   ancorado numa coordenada fixa, também precisa ser refeito quando a
+   geometria de origem se move.
 
+   Guardamos sp_source para recalcular centróide e altura a partir da
+   origem atual, em vez de reutilizar valores obsoletos.                */
+let lastPopup = null;          // { location, html, topH, srcId, title, propKeys }
+let lastPopupOffset = null;
+let popupReposTimer = null;
+let popupRepositioning = false;
+
+async function repositionPopup(recomputeFromSource) {
+  if (!lastPopup || popupRepositioning) return;
+
+  // Se a origem se moveu ou mudou de altura, recalcula posição e conteúdo
+  if (recomputeFromSource && lastPopup.srcId) {
+    const src = getRawSectionFeatures().find(
+      (f) => (f.id || f.properties?.id) === lastPopup.srcId
+    );
+    if (src) {
+      const c = centroid(src);
+      if (c) lastPopup.location = c;
+      const h = (await resolveProps(src, ['height'])).height || 0;
+      lastPopup.topH = h;
+      if (Array.isArray(lastPopup.propKeys) && lastPopup.propKeys.length) {
+        const values = await resolveProps(src, lastPopup.propKeys);
+        const title = getProp(src, 'name') || getProp(src, 'usage') || 'Feature';
+        const html = buildPopupHtml(title, values);
+        if (html) lastPopup.html = html;
+      }
+    }
+  }
+
+  const off = popupPixelOffset(lastPopup.topH, lastPopup.location[1]);
+  const y = off ? off[1] : 0;
+
+  // Só reescreve se algo mudou de fato — evita piscar sem necessidade
+  if (!recomputeFromSource && lastPopupOffset !== null && Math.abs(y - lastPopupOffset) < 2) return;
+  lastPopupOffset = y;
+
+  popupRepositioning = true;
+  try {
+    await rpc.invoke('addHtmlPopup', [
+      lastPopup.html, lastPopup.location, popupOptions(lastPopup.topH, lastPopup.location[1]),
+    ]);
+    if (lastPopup.srcId) {
+      popupRegistry.set(lastPopup.srcId, { ...lastPopup });
+    }
+  } catch (e) {
+    lastPopup = null;   // popup foi fechado — para de tentar
+  } finally {
+    popupRepositioning = false;
+  }
+}
+
+// Câmera mudou (zoom, pan, inclinação) — recalcula o offset em pixels
 function schedulePopupReposition() {
   if (!lastPopup || !lastPopup.topH) return;
   clearTimeout(popupReposTimer);
-  popupReposTimer = setTimeout(async () => {
-    const off = popupPixelOffset(lastPopup.topH, lastPopup.location[1]);
-    const y = off ? off[1] : 0;
-    if (Math.abs(y - lastPopupOffset) < 4) return;   // variação irrelevante
-    lastPopupOffset = y;
-    try {
-      await rpc.invoke('addHtmlPopup', [
-        lastPopup.html, lastPopup.location, popupOptions(lastPopup.topH, lastPopup.location[1]),
-      ]);
-    } catch (e) { /* popup pode ter sido fechado — ignorar */ }
-  }, 400);
+  popupReposTimer = setTimeout(() => repositionPopup(false), 120);
+}
+
+// Geometria de origem mudou — recalcula posição, altura e conteúdo
+let popupSrcTimer = null;
+function schedulePopupFollowSource() {
+  if (!lastPopup || !lastPopup.srcId) return;
+  clearTimeout(popupSrcTimer);
+  popupSrcTimer = setTimeout(() => repositionPopup(true), 250);
 }
 
 /* =========================================================
@@ -1796,6 +1873,8 @@ function evaluateViewMode() {
       setViewMode(flagMode, 'flag de modo do Giraffe');
       return;
     }
+    // Aprende a escala real do mapa sempre que passamos por vista de planta
+    calibrateZoomFactor();
     // M2: área normalizada da viewport (método efetivo nesta versão)
     const m = modeFromViewport();
     if (m) {
@@ -2371,6 +2450,7 @@ function setupAutoSync() {
 
   try {
     giraffeState.addListener(['rawSections'], () => {
+      schedulePopupFollowSource();   // popup segue a origem, mesmo sem auto-sync
       if (!$('autoSync').checked) return;
       // Eco da nossa própria escrita: NÃO descarta — represa para rodar
       // assim que a janela fechar. Sem isso, mudanças feitas logo após
