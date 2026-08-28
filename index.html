@@ -705,7 +705,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V49 · © 2026 Königsberger Vannucchi
+  Beta V50 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -1970,6 +1970,58 @@ function followSource(pt, src) {
   };
 }
 
+/* =========================================================
+   ADIAMENTO DURANTE O "DESFAZER"
+   O Giraffe empilha toda escrita em rawSections, inclusive as do app.
+   Ao apertar Ctrl+Z, o passo desfeito é o do app; o listener percebe o
+   rótulo dessincronizado e reescreve, empilhando um passo NOVO à sua
+   frente. Cada tentativa de recuar repõe um passo — por isso eram
+   necessários vários undos para andar um.
+
+   Aqui o app guarda EM MEMÓRIA (fora do alcance do histórico) a última
+   assinatura de origem com que sincronizou. Se a origem reaparece com
+   uma assinatura já sincronizada e mesmo assim o rótulo diverge, é
+   sinal de desfazer: o app NÃO escreve.
+
+   Mas não bloqueia para sempre — isso quebraria o caso legítimo de você
+   voltar um valor à mão (10 → 12 → 10), em que o rótulo precisa mesmo
+   ser corrigido. Em vez disso, ADIA: agenda uma reverificação. Cada novo
+   evento reinicia a espera, então durante uma rajada de Ctrl+Z o app
+   fica quieto o tempo todo; quando você para, ele confere e corrige.
+   ========================================================= */
+const syncedSigs = new Map();      // idDoPonto -> assinatura já sincronizada
+const UNDO_QUIET_MS = 4000;        // silêncio antes de reconferir
+let deferTimer = null;
+let deferPending = false;
+
+function pointKey(pt) {
+  return pt.id || pt.properties?.id || pt.properties?.name || null;
+}
+
+function sourceSignature(values, topElev, srcCentroid) {
+  const c = Array.isArray(srcCentroid)
+    ? [Number(srcCentroid[0].toFixed(9)), Number(srcCentroid[1].toFixed(9))]
+    : null;
+  try { return JSON.stringify([values, topElev, c]); }
+  catch (e) { return String(topElev) + '|' + String(c); }
+}
+
+// Marca que houve escrita suprimida e agenda a reconferência.
+// forceSync ignora o adiamento na próxima passagem.
+let forceSync = false;
+function deferResync(reason) {
+  deferPending = true;
+  clearTimeout(deferTimer);
+  deferTimer = setTimeout(() => {
+    if (!deferPending) return;
+    deferPending = false;
+    forceSync = true;              // agora sim, escreve se ainda divergir
+    log('Reconferindo rótulos após o período de desfazer...');
+    updatePoints(true);
+  }, UNDO_QUIET_MS);
+  if (reason) log(`Sincronização adiada (${reason}) — aguardando ${UNDO_QUIET_MS / 1000}s de calmaria.`);
+}
+
 async function updatePoints(auto = false, scope = 'all') {
   // Lê direto de giraffeState.rawSections — inclui features em layers
   // ocultos (visibilidade é só de renderização, os dados continuam lá).
@@ -2056,6 +2108,7 @@ async function updatePoints(auto = false, scope = 'all') {
   const toUpdate = [];
   let orphans = 0;
   let skippedStack = 0;
+  let deferred = 0;
 
   for (const pt of points) {
     const srcId = pt.properties.sp_source;
@@ -2096,6 +2149,16 @@ async function updatePoints(auto = false, scope = 'all') {
       const followN = followSource(pt, src);
 
       if (!nvChanged && !elevChangedN && !symOutdated && !followN.geomChanged && !followN.anchorChanged) continue;
+
+      // Origem já sincronizada antes e o rótulo ainda diverge → desfazer.
+      // Adia em vez de reescrever (ver nota sobre o histórico acima).
+      const keyN = pointKey(pt);
+      const sigN = sourceSignature({ nv }, topElevN, centroid(src));
+      if (auto && !forceSync && keyN && syncedSigs.get(keyN) === sigN) {
+        deferred++;
+        continue;
+      }
+      if (keyN) syncedSigs.set(keyN, sigN);
 
       let pngUrlUpd;
       const ptMode = pt.properties.sp_view || '3d';
@@ -2150,6 +2213,16 @@ async function updatePoints(auto = false, scope = 'all') {
       : pt.properties.baseHeight;  // preserva cota existente quando não avaliado
     const elevChanged =
       pt.properties.baseHeight !== topElev || pt.properties._baseHeight !== topElev;
+
+    // Origem já sincronizada antes e o rótulo ainda diverge → desfazer.
+    // Adia em vez de reescrever (ver nota sobre o histórico acima).
+    const key = pointKey(pt);
+    const sig = sourceSignature(values, topElev, centroid(src));
+    if (auto && !forceSync && key && syncedSigs.get(key) === sig) {
+      deferred++;
+      continue;
+    }
+    if (key) syncedSigs.set(key, sig);
 
     // Geometria: o ponto segue o DESLOCAMENTO da origem, preservando
     // qualquer reposicionamento manual (o rótulo fica no mesmo canto).
@@ -2216,10 +2289,20 @@ async function updatePoints(auto = false, scope = 'all') {
     toUpdate.push(updated);
   }
 
+  // Consome o passe livre: ele vale por uma passagem só
+  const wasForced = forceSync;
+  forceSync = false;
+
+  // Houve rótulo adiado → estamos provavelmente no meio de uma rajada de
+  // Ctrl+Z. Reagenda a conferência; cada novo evento adia de novo.
+  if (deferred) deferResync(`${deferred} rótulo(s) durante desfazer`);
+  else if (wasForced) deferPending = false;   // reconferência concluída
+
   if (!toUpdate.length) {
     if (!auto) {
       let msg = 'Nada a atualizar — valores já estão sincronizados.';
       if (orphans) msg += ` (${orphans} órfão(s))`;
+      if (deferred) msg += ` ${deferred} adiado(s) por desfazer recente.`;
       if (skippedStack) msg += ` ${skippedStack} ponto(s) de elementos com stack pulados — selecione esses elementos no mapa e atualize de novo para usar as cotas avaliadas.`;
       log(msg);
     }
@@ -2353,8 +2436,9 @@ function setupAutoSync() {
   });
 }
 
-$('btnUpdateAll').onclick = () => updatePoints(false, 'all');
-$('btnUpdateSel').onclick = () => updatePoints(false, 'selected');
+// Os botões manuais sempre escrevem: você pediu explicitamente.
+$('btnUpdateAll').onclick = () => { forceSync = true; return updatePoints(false, 'all'); };
+$('btnUpdateSel').onclick = () => { forceSync = true; return updatePoints(false, 'selected'); };
 
 /* =========================================================
    DIAGNÓSTICO DA DETECÇÃO DE VISTA
