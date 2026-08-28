@@ -669,6 +669,21 @@ main {
           Sondar Histórico
         </button>
       </div>
+      <div style="margin-top:12px">
+        <label class="kv-label" for="syncDelay">Atraso da sincronização (ms)</label>
+        <select id="syncDelay" class="kv-input" aria-label="Atraso da sincronização">
+          <option value="0">0 — escrita imediata (testar agrupamento)</option>
+          <option value="60">60 ms</option>
+          <option value="220">220 ms (padrão)</option>
+          <option value="800">800 ms</option>
+        </select>
+        <p class="kv-helper" style="margin-top:6px;margin-bottom:0">
+          O Giraffe pode agrupar num só passo de "desfazer" operações muito
+          próximas no tempo. Teste 0 ms e verifique se o Ctrl+Z passa a
+          desfazer a sua edição e o rótulo juntos.
+        </p>
+      </div>
+
       <p class="kv-helper" style="margin-top:8px;margin-bottom:0">
         <strong>Inspecionar</strong> mostra as propriedades brutas da seleção.
         <strong>Diag. Vista</strong> reporta o que o SDK expõe sobre a câmera e a calibração da detecção 2D/3D.
@@ -690,7 +705,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V47 · © 2026 Königsberger Vannucchi
+  Beta V48 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -2232,7 +2247,13 @@ let syncTimer = null;
 let pendingSync = false;   // evento chegou durante nossa escrita — não perder
 let syncRunning = false;   // impede execuções concorrentes de updatePoints
 
-const SYNC_DEBOUNCE = 220;      // resposta mais fluida (era 800ms)
+// Atraso entre a sua edição e a escrita do app. É a variável central do
+// teste de AGRUPAMENTO: o Giraffe pode juntar num único passo de
+// "desfazer" operações muito próximas no tempo. Com 800ms o seu passo
+// certamente já fechou; com 0–60ms há chance de colapsarem em um só.
+const SYNC_DELAY_STORE = 'kv_annot_sync_delay';
+let SYNC_DEBOUNCE = parseInt(localStorage.getItem(SYNC_DELAY_STORE), 10);
+if (!isFinite(SYNC_DEBOUNCE)) SYNC_DEBOUNCE = 220;
 const SELF_WRITE_WINDOW = 900;  // janela do eco da própria escrita
 
 // Agenda uma sincronização com debounce curto
@@ -2491,7 +2512,9 @@ $('btnDiagUndo').onclick = async () => {
       found.push(`${name} → respondeu (${JSON.stringify(r)?.slice(0, 80)})`);
     } catch (e) {
       const msg = String(e && e.message || e);
-      const unknown = /unknown|not a function|no such|não|invalid function|unsupported/i.test(msg);
+      // Assinatura real do SDK para função inexistente, confirmada no
+      // log da v47: "Remote procedure 'X' not registered in remote".
+      const unknown = /not registered|unknown|not a function|no such/i.test(msg);
       if (!unknown) found.push(`${name} → EXISTE (erro de parâmetro: ${msg.slice(0, 90)})`);
     }
   }
@@ -2506,8 +2529,8 @@ $('btnDiagUndo').onclick = async () => {
       log(`  ${name} → aceitou chamada vazia`);
     } catch (e) {
       const msg = String(e && e.message || e);
-      const unknown = /unknown|not a function|no such/i.test(msg);
-      log(`  ${name} → ${unknown ? 'não existe' : 'existe'}`);
+      const unknown = /not registered|unknown|not a function|no such/i.test(msg);
+      log(`  ${name} → ${unknown ? 'NÃO existe' : 'existe (erro de parâmetro)'}`);
     }
   }
   log('══════ FIM ══════');
@@ -2525,6 +2548,20 @@ $('btnInspect').onclick = async () => {
 /* =========================================================
    ABAS — troca de painel (não interfere na lógica existente)
    ========================================================= */
+function setupSyncDelay() {
+  const sel = $('syncDelay');
+  if (!sel) return;
+  sel.value = String(SYNC_DEBOUNCE);
+  if (sel.selectedIndex < 0) sel.value = '220';
+  sel.addEventListener('change', () => {
+    const v = parseInt(sel.value, 10);
+    if (!isFinite(v)) return;
+    SYNC_DEBOUNCE = v;
+    localStorage.setItem(SYNC_DELAY_STORE, String(v));
+    log(`Atraso da sincronização: ${v} ms.`);
+  });
+}
+
 function setupTabs() {
   const tabs = [...document.querySelectorAll('.tab')];
   const select = (target) => {
@@ -2559,6 +2596,7 @@ function setupTabs() {
 (async () => {
   log('App carregado. SDK importado via esm.sh.');
   setupTabs();
+  setupSyncDelay();
   restoreUiState();
   setupSelectionListener();
   setupAutoSync();
