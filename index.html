@@ -682,7 +682,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V37 · © 2026 Königsberger Vannucchi
+  Beta V39 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -994,7 +994,7 @@ function setupSelectionListener() {
           if (saved) {
             try {
               await rpc.invoke('addHtmlPopup', [
-              saved.html, saved.location, popupOptions(saved.topH, saved.location[1]),
+              saved.html, saved.location, popupOptions(saved.topH),
             ]);
             lastPopup = saved;
             lastPopupOffset = null;
@@ -1093,52 +1093,65 @@ function buildPopupHtml(title, values) {
    a câmera deita. Aproximação, mas monotônica e bem comportada.
    ========================================================= */
 
-// ── Escala real do mapa ──────────────────────────────────────────────
-// O zoom de mapView não está na convenção Mapbox (a bbox medida dava
-// 342px onde o canvas tem ~1368px). Em vez de assumir o fator, ele é
-// APRENDIDO: em vista de planta, a altura da bbox em metros dividida
-// pela altura do canvas dá os metros-por-pixel reais. O iframe ocupa a
-// altura da janela, então window.innerHeight aproxima bem o canvas.
-const ZOOM_FACTOR_STORE = 'kv_annot_zoom_factor';
-let zoomScaleFactor = parseFloat(localStorage.getItem(ZOOM_FACTOR_STORE)) || 4;
+// ── ESCALA E INCLINAÇÃO — SEM DEPENDER DO ZOOM ───────────────────────
+// O mapView.zoom não acompanha a câmera de forma confiável (no
+// diagnóstico da v28 ele ficou parado em 17.058 enquanto a bbox mudava).
+// Como o offset do popup é em pixels e escala com o zoom, usar um zoom
+// defasado fazia o deslocamento explodir ao afastar a câmera.
+//
+// Aqui a escala vem de grandezas que SEMPRE refletem a câmera atual:
+//   • dyM  — altura da viewport em metros, direto de mapView.bounds
+//   • altura do canvas ≈ window.innerHeight (o painel ocupa a janela)
+//
+// Falta descontar o efeito da inclinação, que estica a viewport na
+// vertical. A razão de aspecto (dxM/dyM) resolve isso e é imune ao zoom:
+// em planta ela vale a proporção do canvas; ao inclinar, dyM cresce e a
+// razão cai. Logo  kY = aspecto-em-planta / aspecto-atual  mede o quanto
+// a viewport esticou, e daí saem tanto a escala quanto o pitch:
+//   metros-por-pixel = dyM / (altura-canvas × kY)
+//   cos(pitch) ≈ 1/kY   →   sen(pitch) ≈ √(1 − 1/kY²)
+
+const ASPECT_PLAN_STORE = 'kv_annot_aspect_plan';
+let aspectPlan = parseFloat(localStorage.getItem(ASPECT_PLAN_STORE)) || null;
 const POPUP_MAX_OFFSET_PX = 2000;
 
-function calibrateZoomFactor() {
+// O aspecto é MÁXIMO em planta (inclinar só reduz), então aprendemos o maior
+function calibrateAspectPlan(force) {
   const m = viewportMetrics();
-  if (!m || !planAreaPx) return;
-  if (m.area > planAreaPx * 1.05) return;      // só calibra em planta
-  const h = window.innerHeight;
-  if (!h || h < 200) return;
-  const f = m.dy / h;                          // dy está na escala "crua" do zoom
-  if (!isFinite(f) || f <= 0.05 || f > 20) return;
-  const inv = 1 / f;
-  if (Math.abs(inv - zoomScaleFactor) < 0.05) return;
-  zoomScaleFactor = inv;
-  localStorage.setItem(ZOOM_FACTOR_STORE, String(inv));
+  if (!m || !isFinite(m.aspect) || m.aspect <= 0) return;
+  if (force || aspectPlan === null || m.aspect > aspectPlan * 1.02) {
+    aspectPlan = m.aspect;
+    localStorage.setItem(ASPECT_PLAN_STORE, String(aspectPlan));
+  }
 }
 
-// Metros por pixel reais na tela
-function metersPerPixel(lat) {
-  let mv;
-  try { mv = giraffeState.get('mapView'); } catch (e) { return null; }
-  if (!mv || typeof mv.zoom !== 'number') return null;
-  const cosLat = Math.cos((lat * Math.PI) / 180);
-  const raw = (156543.03392 * cosLat) / Math.pow(2, mv.zoom);
-  const v = raw / zoomScaleFactor;
+// Quanto a viewport esticou na vertical por causa da inclinação
+function verticalStretch() {
+  const m = viewportMetrics();
+  if (!m || !aspectPlan || !isFinite(m.aspect) || m.aspect <= 0) return 1;
+  const k = aspectPlan / m.aspect;
+  return Math.min(Math.max(k, 1), 12);
+}
+
+// Metros por pixel reais na tela — sem usar o zoom
+function metersPerPixel() {
+  const m = viewportMetrics();
+  if (!m) return null;
+  const canvasH = window.innerHeight;
+  if (!canvasH || canvasH < 200) return null;
+  const v = m.dyM / (canvasH * verticalStretch());
   return isFinite(v) && v > 0 ? v : null;
 }
 
-// sen(pitch) estimado pela expansão da viewport (ver v29/v36)
 function sinPitchEstimate() {
-  const m = viewportMetrics();
-  if (!m || !planAreaPx) return 0;
-  const r = Math.max(1, m.area / planAreaPx);
-  return Math.sqrt(Math.max(0, 1 - 1 / (r * r)));
+  const k = verticalStretch();
+  if (k <= 1.02) return 0;
+  return Math.sqrt(Math.max(0, 1 - 1 / (k * k)));
 }
 
-function popupPixelOffset(heightMeters, lat) {
+function popupPixelOffset(heightMeters) {
   if (!heightMeters || !isFinite(heightMeters) || heightMeters <= 0) return null;
-  const mPerPx = metersPerPixel(lat);
+  const mPerPx = metersPerPixel();
   if (!mPerPx) return null;
   const sinPitch = sinPitchEstimate();
   if (sinPitch <= 0.02) return null;   // praticamente em planta — sem deslocamento
@@ -1147,9 +1160,9 @@ function popupPixelOffset(heightMeters, lat) {
   return [0, -Math.min(px, POPUP_MAX_OFFSET_PX)];   // negativo = sobe na tela
 }
 
-function popupOptions(heightMeters, lat) {
+function popupOptions(heightMeters) {
   const opts = { closeButton: true, maxWidth: '320px' };
-  const off = popupPixelOffset(heightMeters, lat);
+  const off = popupPixelOffset(heightMeters);
   if (off) opts.offset = off;
   return opts;
 }
@@ -1171,14 +1184,17 @@ async function applyPopups(features, propKeys) {
 
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
-      await rpc.invoke('addHtmlPopup', [html, c, popupOptions(topH, c[1])]);
+      await rpc.invoke('addHtmlPopup', [html, c, popupOptions(topH)]);
       const srcId = f.properties?.id || f.id;
       const entry = { location: c, html, topH, srcId, propKeys };
       if (srcId) popupRegistry.set(srcId, entry);
       lastPopup = entry;
       lastPopupOffset = null;
       log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]${topH ? ` — elevado ao topo (${topH} m)` : ''}`);
-      try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
+      try {
+        suppressViewSwitchUntil = Date.now() + 2500;
+        await rpc.invoke('flyTo', [{ center: c, duration: 800 }]);
+      } catch (e) {}
       count++;
     } catch (e) {
       log('addHtmlPopup falhou: ' + e.message, true);
@@ -1222,7 +1238,7 @@ async function repositionPopup(recomputeFromSource) {
     }
   }
 
-  const off = popupPixelOffset(lastPopup.topH, lastPopup.location[1]);
+  const off = popupPixelOffset(lastPopup.topH);
   const y = off ? off[1] : 0;
 
   // Só reescreve se algo mudou de fato — evita piscar sem necessidade
@@ -1232,7 +1248,7 @@ async function repositionPopup(recomputeFromSource) {
   popupRepositioning = true;
   try {
     await rpc.invoke('addHtmlPopup', [
-      lastPopup.html, lastPopup.location, popupOptions(lastPopup.topH, lastPopup.location[1]),
+      lastPopup.html, lastPopup.location, popupOptions(lastPopup.topH),
     ]);
     if (lastPopup.srcId) {
       popupRegistry.set(lastPopup.srcId, { ...lastPopup });
@@ -1801,10 +1817,15 @@ function viewportMetrics() {
   const mPerPx = (156543.03392 * cosLat) / Math.pow(2, mv.zoom);
   if (!isFinite(mPerPx) || mPerPx <= 0) return null;
 
-  const dx = ((east - west) * 111320 * cosLat) / mPerPx;
-  const dy = ((north - south) * 110574) / mPerPx;
+  // Dimensões da viewport em METROS — não dependem do zoom informado
+  const dxM = (east - west) * 111320 * cosLat;
+  const dyM = (north - south) * 110574;
+  if (!isFinite(dxM) || !isFinite(dyM) || dxM <= 0 || dyM <= 0) return null;
+
+  const dx = dxM / mPerPx;
+  const dy = dyM / mPerPx;
   if (!isFinite(dx) || !isFinite(dy) || dx <= 0 || dy <= 0) return null;
-  return { dx, dy, area: dx * dy };
+  return { dx, dy, area: dx * dy, dxM, dyM, lat0, aspect: dxM / dyM };
 }
 
 // Fixa a referência de planta (chamado quando o usuário escolhe 2D manual)
@@ -1849,11 +1870,18 @@ function ringFromBounds(res) {
 }
 
 // ─── Orquestração ───
+// Movimentos de câmera provocados pelo próprio app (flyTo do popup) não
+// devem disparar troca de símbolo — seria uma escrita em rawSections que
+// o usuário não pediu, poluindo o histórico de desfazer.
+let suppressViewSwitchUntil = 0;
+
 function setViewMode(mode, why) {
   if (!mode || mode === currentViewMode) return;
   currentViewMode = mode;
   log(`Vista: ${mode.toUpperCase()} (${why}).`);
-  if (symbolModeSetting() === 'auto') applyViewModeToNivel(mode);
+  if (symbolModeSetting() !== 'auto') return;
+  if (Date.now() < suppressViewSwitchUntil) return;   // câmera movida pelo app
+  applyViewModeToNivel(mode);
 }
 
 let evaluating = false;
@@ -1874,7 +1902,7 @@ function evaluateViewMode() {
       return;
     }
     // Aprende a escala real do mapa sempre que passamos por vista de planta
-    calibrateZoomFactor();
+    calibrateAspectPlan();
     // M2: área normalizada da viewport (método efetivo nesta versão)
     const m = modeFromViewport();
     if (m) {
@@ -2127,6 +2155,29 @@ function followSource(pt, src) {
   };
 }
 
+/* =========================================================
+   ASSINATURA DA ORIGEM — protege o histórico de "desfazer"
+   O Giraffe registra no undo TODA escrita em rawSections, inclusive as
+   do app. Sem cuidado, o ciclo era: o usuário desfaz → o listener vê os
+   rótulos "dessincronizados" → o app reescreve → o próximo Ctrl+Z desfaz
+   essa reescrita em vez da edição do usuário.
+
+   Para quebrar isso, cada ponto guarda em sp_syncSig uma assinatura do
+   estado da ORIGEM no momento da última sincronização. Se a assinatura
+   não mudou, a origem está intacta e qualquer diferença no ponto veio do
+   usuário (edição manual ou desfazer) — então o app não escreve nada.
+   ========================================================= */
+function sourceSignature(values, topElev, srcCentroid) {
+  const c = Array.isArray(srcCentroid)
+    ? [Number(srcCentroid[0].toFixed(9)), Number(srcCentroid[1].toFixed(9))]
+    : null;
+  try {
+    return JSON.stringify([values, topElev, c]);
+  } catch (e) {
+    return String(topElev) + '|' + String(c);
+  }
+}
+
 async function updatePoints(auto = false, scope = 'all') {
   // Lê direto de giraffeState.rawSections — inclui features em layers
   // ocultos (visibilidade é só de renderização, os dados continuam lá).
@@ -2242,12 +2293,17 @@ async function updatePoints(auto = false, scope = 'all') {
       const topElevN = srcIsEvaluated
         ? ((await resolveProps(src, ['height'])).height || 0)
         : pt.properties.baseHeight;  // preserva cota quando não avaliado
+
+      // A origem mudou desde a última sincronização? Se não, respeitamos
+      // o estado atual do ponto (edição manual ou desfazer) e não escrevemos.
+      const sigN = sourceSignature({ nv }, topElevN, centroid(src));
+      const srcUnchangedN = pt.properties.sp_syncSig === sigN;
+      const symOutdated = pt.properties.sp_sym !== SYM_VERSION;
+      if (srcUnchangedN && !symOutdated) continue;
+
       const nvChanged = nv !== null && pt.properties.kv_nivelDoTopo !== nv;
       const elevChangedN =
         pt.properties.baseHeight !== topElevN || pt.properties._baseHeight !== topElevN;
-      // Símbolo desenhado por uma versão anterior — regenerar para que o
-      // marcador volte a coincidir com o ponto de ancoragem.
-      const symOutdated = pt.properties.sp_sym !== SYM_VERSION;
 
       // Segue o deslocamento da origem preservando o arraste manual
       const followN = followSource(pt, src);
@@ -2276,6 +2332,7 @@ async function updatePoints(auto = false, scope = 'all') {
           _baseHeight: topElevN,
           sp_srcAnchor: followN.anchor,
           sp_sym: SYM_VERSION,
+          sp_syncSig: sigN,
           sp_scaleBase: scN.base,
           sp_scaleApplied: scN.scale,
           marker: {
@@ -2305,6 +2362,13 @@ async function updatePoints(auto = false, scope = 'all') {
     const topElev = srcIsEvaluated
       ? ((await resolveProps(src, ['height'])).height || 0)
       : pt.properties.baseHeight;  // preserva cota existente quando não avaliado
+
+    // A origem mudou desde a última sincronização? Se não, o ponto fica
+    // como está — assim o "desfazer" do Giraffe não é consumido por
+    // reescritas do app, e edições manuais no rótulo são respeitadas.
+    const sig = sourceSignature(values, topElev, centroid(src));
+    if (pt.properties.sp_syncSig === sig) continue;
+
     const elevChanged =
       pt.properties.baseHeight !== topElev || pt.properties._baseHeight !== topElev;
 
@@ -2360,6 +2424,7 @@ async function updatePoints(auto = false, scope = 'all') {
         baseHeight: topElev,
         _baseHeight: topElev,
         sp_srcAnchor: follow.anchor,
+        sp_syncSig: sig,
         ...(useAppProps ? { sp_props: propKeys } : {}),
         marker: {
           ...pt.properties.marker,
@@ -2578,6 +2643,19 @@ $('btnDiagView').onclick = async () => {
   }
   if (!okRpc.length) log('  nenhum RPC de câmera respondeu.');
 
+  // ── 4b. Escala do popup (independente do zoom) ──
+  {
+    const m = viewportMetrics();
+    if (m) {
+      const k = verticalStretch();
+      const mpp = metersPerPixel();
+      const sp = sinPitchEstimate();
+      log(`viewport metros: ${m.dxM.toFixed(1)} × ${m.dyM.toFixed(1)} | aspecto ${m.aspect.toFixed(3)} | aspecto em planta ${aspectPlan ? aspectPlan.toFixed(3) : 'não aprendido'}`);
+      log(`esticamento vertical k=${k.toFixed(3)} | sen(pitch)≈${sp.toFixed(3)} (pitch≈${(Math.asin(Math.min(1, sp)) * 180 / Math.PI).toFixed(0)}°)`);
+      log(`canvas ${window.innerHeight}px | m/px ${mpp ? mpp.toFixed(4) : 'n/d'} | offset p/ 30m: ${mpp ? (30 / mpp * sp).toFixed(0) + 'px' : 'n/d'}`);
+    }
+  }
+
   // ── 4. Medida da viewport — base da detecção automática ──
   const vm = viewportMetrics();
   if (vm) {
@@ -2664,7 +2742,7 @@ function setupTabs() {
     r.addEventListener('change', () => {
       // Escolher 2D manualmente também CALIBRA a referência de planta:
       // o usuário está afirmando que a vista atual é planta.
-      if (r.checked && r.value === '2d') calibratePlanArea();
+      if (r.checked && r.value === '2d') { calibratePlanArea(); calibrateAspectPlan(true); }
       applyViewModeToNivel(effectiveMode());
     });
   });
