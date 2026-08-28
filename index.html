@@ -124,6 +124,56 @@ body {
 }
 
 /* ==========================================================================
+   ABAS
+   ========================================================================== */
+.tab-bar {
+  display: flex;
+  flex-shrink: 0;
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.tab {
+  flex: 1;
+  min-height: 48px;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tab:hover { color: var(--md-sys-color-on-surface); }
+
+.tab[aria-selected="true"] {
+  color: var(--md-sys-color-primary);
+  border-bottom-color: var(--md-sys-color-primary);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
+}
+
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tab-panel[hidden] { display: none; }
+
+.log-wrap-tall #log { max-height: none; min-height: 320px; }
+
+/* ==========================================================================
    MAIN SCROLL AREA
    ========================================================================== */
 main {
@@ -474,136 +524,165 @@ main {
 </header>
 
 <!-- ===================== MAIN ===================== -->
+<!-- ===================== ABAS ===================== -->
+<nav class="tab-bar" role="tablist" aria-label="Seções do aplicativo">
+  <button class="tab" id="tabAnotacoes" role="tab" aria-selected="true" aria-controls="panelAnotacoes" data-panel="panelAnotacoes">Anotações</button>
+  <button class="tab" id="tabLog" role="tab" aria-selected="false" aria-controls="panelLog" data-panel="panelLog">Log e Diagnóstico</button>
+</nav>
+
 <main>
 
-  <!-- STATUS DA SELEÇÃO -->
-  <div id="selStatus">
-    <span>Nenhuma geometria selecionada.</span>
-  </div>
+  <!-- ═══════════════ PAINEL 1 — ANOTAÇÕES ═══════════════ -->
+  <div id="panelAnotacoes" class="tab-panel" role="tabpanel" aria-labelledby="tabAnotacoes">
 
-  <!-- PROPRIEDADES -->
-  <section class="kv-card" aria-label="Propriedades a exibir">
-    <h2 class="kv-card-title">Propriedades a exibir</h2>
-    <div id="propList" class="prop-grid">
-      <!-- checkboxes gerados via JS -->
+    <!-- STATUS DA SELEÇÃO -->
+    <div id="selStatus">
+      <span>Nenhuma geometria selecionada.</span>
     </div>
-  </section>
 
-  <!-- LAYER DE DESTINO -->
-  <section class="kv-card" aria-label="Layer de destino">
-    <div class="layer-row">
-      <h2 class="kv-card-title" style="margin-bottom:0">Layer de destino</h2>
-      <button id="btnRefreshLayers" class="btn-text-sm" title="Recarregar lista de layers" aria-label="Recarregar layers">↻ recarregar</button>
-    </div>
-    <select id="layerSelect" class="kv-input" aria-label="Layer de destino">
-      <option value="default">default</option>
-    </select>
-  </section>
-
-  <!-- COTA BASE + TAMANHO DO TEXTO -->
-  <section class="kv-card" aria-label="Configurações numéricas">
-    <div class="input-grid">
-      <div>
-        <label class="kv-label" for="seaLevel">Cota base (m)</label>
-        <input type="number" id="seaLevel" value="0" step="0.01" class="kv-input" aria-describedby="seaLevelHelp" />
+    <!-- PROPRIEDADES -->
+    <section class="kv-card" aria-label="Propriedades a exibir">
+      <h2 class="kv-card-title">Propriedades a exibir</h2>
+      <div id="propList" class="prop-grid">
+        <!-- checkboxes gerados via JS -->
       </div>
-      <div>
-        <label class="kv-label" for="textSize">Tamanho do texto</label>
-        <input type="number" id="textSize" value="30" step="1" min="1" class="kv-input" />
+
+      <hr class="kv-divider" />
+
+      <!-- Rótulo de Nível: saída gráfica, mora junto das propriedades -->
+      <label class="kv-check-label">
+        <input type="checkbox" id="outNivel" />
+        <span>Rótulo de Nível <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(símbolo + Nível do Topo)</span></span>
+      </label>
+
+      <div class="kv-radio-row" style="margin-top:4px" role="radiogroup" aria-label="Modo do símbolo de nível">
+        <span class="kv-label" style="margin-bottom:0">Símbolo</span>
+        <label class="kv-radio-label"><input type="radio" name="symMode" value="auto" checked /> Auto</label>
+        <label class="kv-radio-label"><input type="radio" name="symMode" value="2d" /> 2D</label>
+        <label class="kv-radio-label"><input type="radio" name="symMode" value="3d" /> 3D</label>
       </div>
-    </div>
-    <p id="seaLevelHelp" class="kv-helper mt-8">Cota relativa ao nível do mar em relação ao zero do arquivo.</p>
-  </section>
+    </section>
 
-  <!-- TIPO DE SAÍDA -->
-  <section class="kv-card" aria-label="Tipo de saída">
-    <h2 class="kv-card-title">Tipo de saída</h2>
+    <!-- LAYER DE DESTINO -->
+    <section class="kv-card" aria-label="Layer de destino">
+      <div class="layer-row">
+        <h2 class="kv-card-title" style="margin-bottom:0">Layer de destino</h2>
+        <button id="btnRefreshLayers" class="btn-text-sm" title="Recarregar lista de layers" aria-label="Recarregar layers">↻ recarregar</button>
+      </div>
+      <select id="layerSelect" class="kv-input" aria-label="Layer de destino">
+        <option value="default">default</option>
+      </select>
+    </section>
 
-    <label class="kv-check-label">
-      <input type="checkbox" id="outPopup" checked />
-      <span>Gerar HTML Popup</span>
-    </label>
-    <label class="kv-check-label">
-      <input type="checkbox" id="outLabel" />
-      <span>Gerar Label (geometria de texto)</span>
-    </label>
-    <label class="kv-check-label">
-      <input type="checkbox" id="outNivel" />
-      <span>Gerar Rótulo de Nível <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(símbolo + Nível do Topo)</span></span>
-    </label>
+    <!-- COTA BASE + TAMANHO DO TEXTO -->
+    <section class="kv-card" aria-label="Configurações numéricas">
+      <div class="input-grid">
+        <div>
+          <label class="kv-label" for="seaLevel">Cota base (m)</label>
+          <input type="number" id="seaLevel" value="0" step="0.01" class="kv-input" aria-describedby="seaLevelHelp" />
+        </div>
+        <div>
+          <label class="kv-label" for="textSize">Tamanho do texto</label>
+          <input type="number" id="textSize" value="30" step="1" min="1" class="kv-input" />
+        </div>
+      </div>
+      <p id="seaLevelHelp" class="kv-helper mt-8">Cota relativa ao nível do mar em relação ao zero do arquivo.</p>
+    </section>
 
-    <hr class="kv-divider" />
+    <!-- TIPO DE SAÍDA -->
+    <section class="kv-card" aria-label="Tipo de saída">
+      <h2 class="kv-card-title">Tipo de saída</h2>
 
-    <p class="kv-label" style="margin-bottom:6px">Símbolo de nível</p>
-    <div class="kv-radio-row" role="radiogroup" aria-label="Modo do símbolo de nível">
-      <label class="kv-radio-label"><input type="radio" name="symMode" value="auto" checked /> Auto</label>
-      <label class="kv-radio-label"><input type="radio" name="symMode" value="2d" /> 2D</label>
-      <label class="kv-radio-label"><input type="radio" name="symMode" value="3d" /> 3D</label>
-    </div>
-
-    <hr class="kv-divider" />
-
-    <label class="kv-check-label">
-      <input type="checkbox" id="autoSync" />
-      <span>Sincronização automática <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(atualiza labels quando a origem mudar)</span></span>
-    </label>
-  </section>
-
-  <!-- MODO DE ATUALIZAÇÃO -->
-  <section class="kv-card" aria-label="Modo de atualização">
-    <h2 class="kv-card-title">Ao atualizar, exibir</h2>
-    <div role="radiogroup" aria-label="Modo de atualização">
-      <label class="kv-radio-label" style="min-height:32px;margin-bottom:4px">
-        <input type="radio" name="updMode" value="original" checked />
-        <span>As propriedades da criação de cada ponto</span>
+      <label class="kv-check-label">
+        <input type="checkbox" id="outPopup" checked />
+        <span>Gerar HTML Popup</span>
       </label>
-      <label class="kv-radio-label" style="min-height:32px">
-        <input type="radio" name="updMode" value="app" />
-        <span>As propriedades marcadas no app agora</span>
+      <label class="kv-check-label">
+        <input type="checkbox" id="outLabel" />
+        <span>Gerar Label (geometria de texto)</span>
       </label>
-    </div>
-  </section>
 
-  <!-- AÇÕES -->
-  <div>
-    <button id="btnApply" class="btn-primary" aria-label="Aplicar anotações nas features selecionadas">
-      Aplicar Anotações
-    </button>
-  </div>
-  <div class="btn-row">
-    <button id="btnUpdateAll" class="btn-outlined" title="Atualiza todos os pontos do app no projeto" aria-label="Atualizar todos os pontos">
-      Atualizar Todos
-    </button>
-    <button id="btnUpdateSel" class="btn-outlined" title="Atualiza apenas os pontos vinculados aos elementos selecionados" aria-label="Atualizar selecionados">
-      Atualizar Selecionados
-    </button>
-  </div>
-  <div class="btn-row">
-    <button id="btnClear" class="btn-ghost" title="Remove labels criados por este app e fecha o popup" aria-label="Limpar anotações">
-      Limpar
-    </button>
-    <button id="btnInspect" class="btn-ghost" title="Despeja o JSON raw das properties da seleção no log" aria-label="Inspecionar propriedades">
-      Inspecionar
-    </button>
-    <button id="btnDiagView" class="btn-ghost" title="Despeja no log tudo que o SDK expõe sobre a câmera — use para calibrar a detecção Auto 2D/3D" aria-label="Diagnóstico da detecção de vista">
-      Diag. Vista
-    </button>
+      <hr class="kv-divider" />
+
+      <label class="kv-check-label">
+        <input type="checkbox" id="autoSync" />
+        <span>Sincronização automática <span style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">(atualiza labels quando a origem mudar)</span></span>
+      </label>
+    </section>
+
+    <!-- AÇÕES -->
+    <div>
+      <button id="btnApply" class="btn-primary" aria-label="Aplicar anotações nas features selecionadas">
+        Aplicar Anotações
+      </button>
+    </div>
+
+    <!-- MODO DE ATUALIZAÇÃO -->
+    <section class="kv-card" aria-label="Modo de atualização">
+      <h2 class="kv-card-title">Ao atualizar, exibir</h2>
+      <div role="radiogroup" aria-label="Modo de atualização">
+        <label class="kv-radio-label" style="min-height:32px;margin-bottom:4px">
+          <input type="radio" name="updMode" value="original" checked />
+          <span>As propriedades da criação de cada ponto</span>
+        </label>
+        <label class="kv-radio-label" style="min-height:32px">
+          <input type="radio" name="updMode" value="app" />
+          <span>As propriedades marcadas no app agora</span>
+        </label>
+      </div>
+    </section>
+
+    <div class="btn-row">
+      <button id="btnUpdateAll" class="btn-outlined" title="Atualiza todos os pontos do app no projeto" aria-label="Atualizar todos os pontos">
+        Atualizar Todos
+      </button>
+      <button id="btnUpdateSel" class="btn-outlined" title="Atualiza apenas os pontos vinculados aos elementos selecionados" aria-label="Atualizar selecionados">
+        Atualizar Selecionados
+      </button>
+    </div>
+    <div class="btn-row">
+      <button id="btnClear" class="btn-ghost" title="Remove labels criados por este app e fecha o popup" aria-label="Limpar anotações">
+        Limpar
+      </button>
+    </div>
+
   </div>
 
-  <!-- LOG -->
-  <div class="log-wrap">
-    <div class="log-header">
-      <span class="log-label">Log</span>
-      <button id="btnClearLog" class="btn-text-sm" aria-label="Limpar log">limpar</button>
+  <!-- ═══════════════ PAINEL 2 — LOG E DIAGNÓSTICO ═══════════════ -->
+  <div id="panelLog" class="tab-panel" role="tabpanel" aria-labelledby="tabLog" hidden>
+
+    <section class="kv-card" aria-label="Ferramentas de diagnóstico">
+      <h2 class="kv-card-title">Diagnóstico</h2>
+      <div class="btn-row">
+        <button id="btnInspect" class="btn-ghost" title="Despeja o JSON raw das properties da seleção no log" aria-label="Inspecionar propriedades">
+          Inspecionar
+        </button>
+        <button id="btnDiagView" class="btn-ghost" title="Despeja no log tudo que o SDK expõe sobre a câmera — use para calibrar a detecção Auto 2D/3D" aria-label="Diagnóstico da detecção de vista">
+          Diag. Vista
+        </button>
+      </div>
+      <p class="kv-helper" style="margin-top:8px;margin-bottom:0">
+        <strong>Inspecionar</strong> mostra as propriedades brutas da seleção.
+        <strong>Diag. Vista</strong> reporta o que o SDK expõe sobre a câmera e a calibração da detecção 2D/3D.
+      </p>
+    </section>
+
+    <!-- LOG -->
+    <div class="log-wrap log-wrap-tall">
+      <div class="log-header">
+        <span class="log-label">Log</span>
+        <button id="btnClearLog" class="btn-text-sm" aria-label="Limpar log">limpar</button>
+      </div>
+      <div id="log" role="log" aria-live="polite" aria-label="Log de operações"></div>
     </div>
-    <div id="log" role="log" aria-live="polite" aria-label="Log de operações"></div>
+
   </div>
 
 </main>
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  KV Arquitetos · Gerador de Anotações · Beta V32
+  Beta V33 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -623,8 +702,9 @@ const DEFAULT_PROPS = [
   { key: 'name',         label: 'Name (nome)',            pt: 'Nome',          def: false },
   { key: 'floorToFloor', label: 'Floor to Floor',         pt: 'Piso a Piso',   def: true  },
   { key: 'baseHeight',   label: 'Base Height (altura na base)', pt: 'Altura na Base', def: false },
-  { key: 'nivelDaBase',  label: 'Nível da Base (base + cota)',  pt: 'Nível da Base',  def: false },
-  { key: 'nivelDoTopo',  label: 'Nível do Topo (altura + cota)', pt: 'Nível do Topo', def: false },
+  { key: 'alturaDoTopo', label: 'Altura do Topo (sem cota do mar)', pt: 'Altura do Topo', def: false },
+  { key: 'nivelDaBase',  label: 'Nível da Base (base + cota do mar)',  pt: 'Nível da Base',  def: false },
+  { key: 'nivelDoTopo',  label: 'Nível do Topo (altura + cota do mar)', pt: 'Nível do Topo', def: false },
 ];
 const PROP_PT = Object.fromEntries(DEFAULT_PROPS.map((p) => [p.key, p.pt]));
 PROP_PT.nivelDoMar = 'Nível do Topo';  // alias — pontos criados na v10 usavam esta chave
@@ -833,6 +913,8 @@ async function resolveProps(feature, keys) {
   for (const k of keys) {
     if (k === 'height') {
       out[k] = resolveTopHeight();                        // Altura = top height
+    } else if (k === 'alturaDoTopo') {
+      out[k] = resolveTopHeight();                        // topo absoluto, SEM a cota do mar
     } else if (k === 'baseHeight') {
       out[k] = resolveBaseHeight();
     } else if (k === 'nivelDaBase') {
@@ -2306,10 +2388,42 @@ $('btnInspect').onclick = async () => {
 };
 
 /* =========================================================
+   ABAS — troca de painel (não interfere na lógica existente)
+   ========================================================= */
+function setupTabs() {
+  const tabs = [...document.querySelectorAll('.tab')];
+  const select = (target) => {
+    tabs.forEach((t) => {
+      const on = t.dataset.panel === target;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      const panel = document.getElementById(t.dataset.panel);
+      if (panel) panel.hidden = !on;
+    });
+    try { localStorage.setItem('kv_annot_tab', target); } catch (e) {}
+  };
+  tabs.forEach((t) => {
+    t.addEventListener('click', () => select(t.dataset.panel));
+    // Navegação por setas entre abas (WCAG)
+    t.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const i = tabs.indexOf(t);
+      const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus();
+      select(next.dataset.panel);
+    });
+  });
+  let saved = null;
+  try { saved = localStorage.getItem('kv_annot_tab'); } catch (e) {}
+  select(saved && document.getElementById(saved) ? saved : 'panelAnotacoes');
+}
+
+/* =========================================================
    INIT
    ========================================================= */
 (async () => {
   log('App carregado. SDK importado via esm.sh.');
+  setupTabs();
   restoreUiState();
   setupSelectionListener();
   setupAutoSync();
