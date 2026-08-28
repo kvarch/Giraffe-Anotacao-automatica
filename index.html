@@ -682,7 +682,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V35 · © 2026 Königsberger Vannucchi
+  Beta V36 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -993,7 +993,10 @@ function setupSelectionListener() {
           const saved = srcId ? popupRegistry.get(srcId) : null;
           if (saved) {
             try {
-              await rpc.invoke('addHtmlPopup', [saved.html, saved.location, { closeButton: true, maxWidth: '320px' }]);
+              await rpc.invoke('addHtmlPopup', [
+              saved.html, saved.location, popupOptions(saved.topH, saved.location[1]),
+            ]);
+            lastPopup = saved;
             } catch (e) { /* silencioso */ }
           }
         }
@@ -1071,6 +1074,60 @@ function buildPopupHtml(title, values) {
   </div>`;
 }
 
+/* =========================================================
+   ELEVAÇÃO DO POPUP ATÉ O TOPO DO ELEMENTO
+   O popup do Mapbox é ancorado apenas por lng/lat — não tem componente
+   de altura. Num elemento alto, ele fica no chão enquanto o volume sobe.
+   Compensamos com um deslocamento em PIXELS na tela.
+
+   Quanto uma altura h desloca verticalmente na tela depende da
+   inclinação da câmera: em planta (pitch 0) não desloca nada, pois o
+   topo projeta sobre a base; quanto mais inclinada, maior o efeito.
+   O deslocamento é ≈ (h / metros-por-pixel) × sen(pitch).
+
+   O pitch não é exposto pelo SDK (ver diagnóstico da v28), mas a razão
+   entre a área da viewport e a área em planta cresce com ele. Usando
+   r = área / área-em-planta, temos cos(pitch) ≈ 1/r, logo
+   sen(pitch) ≈ √(1 − 1/r²) — que vale 0 em planta e tende a 1 quando
+   a câmera deita. Aproximação, mas monotônica e bem comportada.
+   ========================================================= */
+
+// O zoom de mapView está 2 níveis abaixo da convenção Mapbox — verificado
+// contra a bbox no diagnóstico da v28 (342px medidos ↔ canvas de ~1368px).
+const MAPVIEW_ZOOM_OFFSET = 2;
+const POPUP_MAX_OFFSET_PX = 2000;
+
+function popupPixelOffset(heightMeters, lat) {
+  if (!heightMeters || !isFinite(heightMeters) || heightMeters <= 0) return null;
+  let mv;
+  try { mv = giraffeState.get('mapView'); } catch (e) { return null; }
+  if (!mv || typeof mv.zoom !== 'number') return null;
+
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const mPerPx = (156543.03392 * cosLat) / Math.pow(2, mv.zoom + MAPVIEW_ZOOM_OFFSET);
+  if (!isFinite(mPerPx) || mPerPx <= 0) return null;
+
+  // sen(pitch) estimado pela expansão da viewport
+  let sinPitch = 0;
+  const m = viewportMetrics();
+  if (m && planAreaPx) {
+    const r = Math.max(1, m.area / planAreaPx);
+    sinPitch = Math.sqrt(Math.max(0, 1 - 1 / (r * r)));
+  }
+  if (sinPitch <= 0.02) return null;   // praticamente em planta — sem deslocamento
+
+  const px = (heightMeters / mPerPx) * sinPitch;
+  if (!isFinite(px) || px < 1) return null;
+  return [0, -Math.min(px, POPUP_MAX_OFFSET_PX)];   // negativo = sobe na tela
+}
+
+function popupOptions(heightMeters, lat) {
+  const opts = { closeButton: true, maxWidth: '320px' };
+  const off = popupPixelOffset(heightMeters, lat);
+  if (off) opts.offset = off;
+  return opts;
+}
+
 async function applyPopups(features, propKeys) {
   // O SDK mantém apenas um popup SDK ativo por vez; aplicamos no
   // centroide de cada feature em sequência — o último fica visível.
@@ -1082,12 +1139,17 @@ async function applyPopups(features, propKeys) {
     const title = getProp(f, 'name') || getProp(f, 'usage') || 'Feature';
     const html = buildPopupHtml(title, values);
     if (!html) continue;
+
+    // Altura do topo da origem — define o quanto o popup sobe na tela
+    const topH = (await resolveProps(f, ['height'])).height || 0;
+
     try {
       // Assinatura posicional confirmada nos docs: (html, lngLat, PopupOptions)
-      await rpc.invoke('addHtmlPopup', [html, c, { closeButton: true, maxWidth: '320px' }]);
+      await rpc.invoke('addHtmlPopup', [html, c, popupOptions(topH, c[1])]);
       const srcId = f.properties?.id || f.id;
-      if (srcId) popupRegistry.set(srcId, { location: c, html });
-      log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`);
+      if (srcId) popupRegistry.set(srcId, { location: c, html, topH });
+      lastPopup = { location: c, html, topH };
+      log(`Popup criado em [${c[0].toFixed(6)}, ${c[1].toFixed(6)}]${topH ? ` — elevado ao topo (${topH} m)` : ''}`);
       try { await rpc.invoke('flyTo', [{ center: c, duration: 800 }]); } catch (e) {}
       count++;
     } catch (e) {
@@ -1095,6 +1157,29 @@ async function applyPopups(features, propKeys) {
     }
   }
   log(`Popup(s) aplicado(s): ${count}${count > 1 ? ' (apenas o último permanece visível — limitação do SDK)' : ''}`);
+}
+
+/* Reposiciona o popup ativo quando a câmera muda — o deslocamento em
+   pixels depende do zoom e da inclinação, então precisa ser recalculado.
+   Só reescreve quando a diferença é perceptível, para não piscar. */
+let lastPopup = null;
+let lastPopupOffset = 0;
+let popupReposTimer = null;
+
+function schedulePopupReposition() {
+  if (!lastPopup || !lastPopup.topH) return;
+  clearTimeout(popupReposTimer);
+  popupReposTimer = setTimeout(async () => {
+    const off = popupPixelOffset(lastPopup.topH, lastPopup.location[1]);
+    const y = off ? off[1] : 0;
+    if (Math.abs(y - lastPopupOffset) < 4) return;   // variação irrelevante
+    lastPopupOffset = y;
+    try {
+      await rpc.invoke('addHtmlPopup', [
+        lastPopup.html, lastPopup.location, popupOptions(lastPopup.topH, lastPopup.location[1]),
+      ]);
+    } catch (e) { /* popup pode ter sido fechado — ignorar */ }
+  }, 400);
 }
 
 /* =========================================================
@@ -1726,7 +1811,10 @@ function evaluateViewMode() {
 function setupViewModeDetection() {
   // mapView muda a cada movimento de câmera — reação imediata, sem polling
   try {
-    giraffeState.addListener(['mapView'], () => evaluateViewMode());
+    giraffeState.addListener(['mapView'], () => {
+      evaluateViewMode();
+      schedulePopupReposition();   // popup elevado depende de zoom e inclinação
+    });
     log('Detecção de vista ativa (giraffeState.mapView).');
   } catch (e) {
     log('Falha ao registrar listener de mapView: ' + e.message, true);
@@ -1867,6 +1955,7 @@ $('btnApply').onclick = async () => {
 
 $('btnClear').onclick = async () => {
   try { await rpc.invoke('clearSDKPopup', []); } catch (e) {}
+  lastPopup = null;
   const n = await deleteTaggedSections();
   log(`Limpeza concluída (${n} label(s) removidos, popup fechado).`);
 };
