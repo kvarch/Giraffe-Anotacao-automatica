@@ -796,7 +796,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V54 · © 2026 Königsberger Vannucchi
+  Beta V56 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -2614,6 +2614,10 @@ function setupAutoSync() {
 
   try {
     giraffeState.addListener(['rawSections'], () => {
+      // Painel de Informações acompanha a origem — independe do auto-sync,
+      // porque é só leitura e não escreve nada no projeto.
+      scheduleInfoRefresh();
+
       if (!$('autoSync').checked) return;
       // Eco da nossa própria escrita: NÃO descarta — represa para rodar
       // assim que a janela fechar. Sem isso, mudanças feitas logo após
@@ -2898,6 +2902,27 @@ const UNITS = {
 let infoPending = true;
 let infoLastFeats = [];
 const MAX_INFO_CARDS = 10;
+
+/* Recarrega o painel quando a geometria de origem muda — se você
+   alterar pavimentos, altura ou piso a piso com o elemento selecionado,
+   os valores derivados se atualizam sozinhos.
+
+   Isto é leitura pura: relê a seleção (que vem avaliada, com _height e
+   _baseHeight) e redesenha. Não chama createRawSections nem
+   updateRawSections, portanto não entra no histórico de desfazer. */
+let infoRefreshTimer = null;
+
+function scheduleInfoRefresh() {
+  if (!infoPanelVisible()) { infoPending = true; return; }
+  if (!infoLastFeats.length) return;
+  clearTimeout(infoRefreshTimer);
+  infoRefreshTimer = setTimeout(async () => {
+    try {
+      const feats = await readSelection();
+      if (feats.length) renderInfoPanel(feats);
+    } catch (e) { /* silencioso — é só consulta */ }
+  }, 300);
+}
 
 function infoPanelVisible() {
   const p = document.getElementById('panelInfo');
