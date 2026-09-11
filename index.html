@@ -176,6 +176,19 @@ body {
 /* ==========================================================================
    PAINEL DE INFORMAÇÕES
    ========================================================================== */
+#txtStatus {
+  background-color: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--md-sys-color-on-surface-variant);
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+#txtStatus .accent { color: var(--kv-accent); font-weight: 600; }
+
 #infoStatus {
   background-color: var(--md-sys-color-surface-container);
   border: 1px solid var(--md-sys-color-outline-variant);
@@ -601,6 +614,7 @@ main {
 <nav class="tab-bar" role="tablist" aria-label="Seções do aplicativo">
   <button class="tab" id="tabAnotacoes" role="tab" aria-selected="true" aria-controls="panelAnotacoes" data-panel="panelAnotacoes">Anotações</button>
   <button class="tab" id="tabInfo" role="tab" aria-selected="false" aria-controls="panelInfo" data-panel="panelInfo">Informações</button>
+  <button class="tab" id="tabTexto" role="tab" aria-selected="false" aria-controls="panelTexto" data-panel="panelTexto">Textos</button>
   <button class="tab" id="tabLog" role="tab" aria-selected="false" aria-controls="panelLog" data-panel="panelLog">Log e Diagnóstico</button>
 </nav>
 
@@ -744,7 +758,74 @@ main {
 
   </div>
 
-  <!-- ═══════════════ PAINEL 3 — LOG E DIAGNÓSTICO ═══════════════ -->
+  <!-- ═══════════════ PAINEL 3 — TEXTOS NO PLANO ═══════════════ -->
+  <div id="panelTexto" class="tab-panel" role="tabpanel" aria-labelledby="tabTexto" hidden>
+
+    <div id="txtStatus">
+      <span>Digite o texto e clique em Criar. Ele nasce no centro da tela.</span>
+    </div>
+
+    <section class="kv-card" aria-label="Conteúdo do texto">
+      <label class="kv-label" for="txtContent">Texto</label>
+      <textarea id="txtContent" class="kv-input" rows="2"
+        style="height:auto;padding:8px 12px;resize:vertical;line-height:1.4"
+        placeholder="Ex.: QUADRA 12 — SETOR NORTE"></textarea>
+      <p class="kv-helper" style="margin-top:6px;margin-bottom:0">
+        Desenhado como geometria de linhas, deitado no plano do terreno.
+        Acentos são simplificados e minúsculas viram maiúsculas.
+      </p>
+    </section>
+
+    <section class="kv-card" aria-label="Forma do texto">
+      <div class="input-grid">
+        <div>
+          <label class="kv-label" for="txtSize">Altura da letra (m)</label>
+          <input type="number" id="txtSize" class="kv-input" value="10" min="0.1" step="0.5" />
+        </div>
+        <div>
+          <label class="kv-label" for="txtRotation">Rotação (graus)</label>
+          <input type="number" id="txtRotation" class="kv-input" value="0" step="5" />
+        </div>
+      </div>
+      <div class="input-grid mt-8">
+        <div>
+          <label class="kv-label" for="txtElev">Cota (m)</label>
+          <input type="number" id="txtElev" class="kv-input" value="0" step="0.5" />
+        </div>
+        <div>
+          <label class="kv-label" for="txtWeight">Espessura do traço</label>
+          <input type="number" id="txtWeight" class="kv-input" value="2" min="0.5" step="0.5" />
+        </div>
+      </div>
+      <div class="mt-8">
+        <label class="kv-label" for="txtColor">Cor</label>
+        <input type="color" id="txtColor" class="kv-input" value="#000000" style="height:40px;padding:4px" />
+      </div>
+    </section>
+
+    <div>
+      <button id="btnTxtCreate" class="btn-primary" aria-label="Criar texto no mapa">Criar Texto</button>
+    </div>
+    <div class="btn-row">
+      <button id="btnTxtLoad" class="btn-outlined" title="Carrega nos campos o texto selecionado no mapa" aria-label="Carregar texto selecionado">
+        Carregar Selecionado
+      </button>
+      <button id="btnTxtApply" class="btn-outlined" title="Aplica as alterações ao texto carregado" aria-label="Aplicar alterações">
+        Aplicar Alterações
+      </button>
+    </div>
+    <div class="btn-row">
+      <button id="btnTxtDelete" class="btn-ghost" title="Remove o texto carregado ou o selecionado no mapa" aria-label="Remover texto">
+        Remover Texto
+      </button>
+      <button id="btnTxtDeleteAll" class="btn-ghost" title="Remove todos os textos criados por este módulo" aria-label="Remover todos os textos">
+        Remover Todos
+      </button>
+    </div>
+
+  </div>
+
+  <!-- ═══════════════ PAINEL 4 — LOG E DIAGNÓSTICO ═══════════════ -->
   <div id="panelLog" class="tab-panel" role="tabpanel" aria-labelledby="tabLog" hidden>
 
     <section class="kv-card" aria-label="Ferramentas de diagnóstico">
@@ -814,7 +895,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V57 · © 2026 Königsberger Vannucchi
+  Beta V58 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -3159,6 +3240,334 @@ async function renderInfoPanel(feats) {
 
   box.innerHTML = parts.join('');
 }
+
+
+/* =========================================================
+   MÓDULO DE TEXTOS NO PLANO
+   A sonda da v57 confirmou que os marcadores do Giraffe são sempre
+   billboard: encaram a câmera em qualquer vista. Nenhuma variante de
+   pitchAlignment / rotationAlignment funcionou.
+
+   Então o texto é desenhado como GEOMETRIA — polilinhas criadas por
+   createRawSections, a única API que rende linha em elevação 3D real.
+   Geometria vive no mundo, então deita no plano do terreno por natureza
+   e a rotação é exata, não aproximada.
+
+   O preço é tipográfico: fonte de traço (single-stroke), no espírito
+   das fontes de plotter usadas em CAD, em vez da Hind.
+   ========================================================= */
+const TXT_TAG = 'kv_text';
+const GLYPH_H = 7;      // altura da grade dos glifos
+const GLYPH_W = 5;      // largura nominal
+const GLYPH_ADV = 6.6;  // avanço horizontal entre caracteres
+const SPACE_ADV = 4.5;
+
+const GLYPHS = {
+  'A':[[[0,0],[2.5,7],[5,0]],[[1,2.5],[4,2.5]]],
+  'B':[[[0,0],[0,7],[3.5,7],[4.6,6],[4.6,4.6],[3.5,3.6],[0,3.6]],[[3.5,3.6],[4.8,2.5],[4.8,1],[3.5,0],[0,0]]],
+  'C':[[[5,5.5],[3.5,7],[1.5,7],[0,5.5],[0,1.5],[1.5,0],[3.5,0],[5,1.5]]],
+  'D':[[[0,0],[0,7],[3,7],[5,5],[5,2],[3,0],[0,0]]],
+  'E':[[[5,7],[0,7],[0,0],[5,0]],[[0,3.5],[3.5,3.5]]],
+  'F':[[[5,7],[0,7],[0,0]],[[0,3.5],[3.5,3.5]]],
+  'G':[[[5,5.5],[3.5,7],[1.5,7],[0,5.5],[0,1.5],[1.5,0],[3.5,0],[5,1.5],[5,3],[3,3]]],
+  'H':[[[0,0],[0,7]],[[5,0],[5,7]],[[0,3.5],[5,3.5]]],
+  'I':[[[2.5,0],[2.5,7]],[[1,7],[4,7]],[[1,0],[4,0]]],
+  'J':[[[4,7],[4,1.5],[3,0],[1,0],[0,1.5]]],
+  'K':[[[0,0],[0,7]],[[5,7],[0,3]],[[1.8,4.2],[5,0]]],
+  'L':[[[0,7],[0,0],[5,0]]],
+  'M':[[[0,0],[0,7],[2.5,3],[5,7],[5,0]]],
+  'N':[[[0,0],[0,7],[5,0],[5,7]]],
+  'O':[[[1.5,0],[0,1.5],[0,5.5],[1.5,7],[3.5,7],[5,5.5],[5,1.5],[3.5,0],[1.5,0]]],
+  'P':[[[0,0],[0,7],[3.5,7],[5,5.8],[5,4.2],[3.5,3],[0,3]]],
+  'Q':[[[1.5,0],[0,1.5],[0,5.5],[1.5,7],[3.5,7],[5,5.5],[5,1.5],[3.5,0],[1.5,0]],[[3,1.6],[5.2,-0.4]]],
+  'R':[[[0,0],[0,7],[3.5,7],[5,5.8],[5,4.2],[3.5,3],[0,3]],[[2.8,3],[5,0]]],
+  'S':[[[5,5.8],[3.5,7],[1.5,7],[0,5.8],[0,4.5],[1.5,3.5],[3.5,3.5],[5,2.5],[5,1.2],[3.5,0],[1.5,0],[0,1.2]]],
+  'T':[[[0,7],[5,7]],[[2.5,7],[2.5,0]]],
+  'U':[[[0,7],[0,1.5],[1.5,0],[3.5,0],[5,1.5],[5,7]]],
+  'V':[[[0,7],[2.5,0],[5,7]]],
+  'W':[[[0,7],[1.2,0],[2.5,4],[3.8,0],[5,7]]],
+  'X':[[[0,0],[5,7]],[[0,7],[5,0]]],
+  'Y':[[[0,7],[2.5,3.5],[5,7]],[[2.5,3.5],[2.5,0]]],
+  'Z':[[[0,7],[5,7],[0,0],[5,0]]],
+  '0':[[[1.5,0],[0,1.5],[0,5.5],[1.5,7],[3.5,7],[5,5.5],[5,1.5],[3.5,0],[1.5,0]],[[0.6,1],[4.4,6]]],
+  '1':[[[1,5.5],[2.5,7],[2.5,0]],[[1,0],[4,0]]],
+  '2':[[[0,5.5],[1.5,7],[3.5,7],[5,5.5],[5,4.5],[0,0],[5,0]]],
+  '3':[[[0,7],[5,7],[2.2,4],[3.5,4],[5,2.8],[5,1.2],[3.5,0],[1.5,0],[0,1.2]]],
+  '4':[[[3.5,0],[3.5,7],[0,2],[5,2]]],
+  '5':[[[5,7],[0,7],[0,4],[3.5,4],[5,2.8],[5,1.2],[3.5,0],[1.5,0],[0,1.2]]],
+  '6':[[[5,5.8],[3.5,7],[1.5,7],[0,5.5],[0,1.5],[1.5,0],[3.5,0],[5,1.2],[5,2.8],[3.5,4],[1.5,4],[0,2.8]]],
+  '7':[[[0,7],[5,7],[2,0]]],
+  '8':[[[1.5,4],[0,5],[0,6],[1.5,7],[3.5,7],[5,6],[5,5],[3.5,4],[1.5,4],[0,2.8],[0,1.2],[1.5,0],[3.5,0],[5,1.2],[5,2.8],[3.5,4]]],
+  '9':[[[0,1.2],[1.5,0],[3.5,0],[5,1.5],[5,5.5],[3.5,7],[1.5,7],[0,5.8],[0,4.2],[1.5,3],[3.5,3],[5,4.2]]],
+  '.':[[[2.2,0],[2.8,0]]],
+  ',':[[[2.8,0.6],[1.9,-1]]],
+  '-':[[[1,3.5],[4,3.5]]],
+  '_':[[[0,-1],[5,-1]]],
+  '/':[[[0,0],[5,7]]],
+  '\\':[[[0,7],[5,0]]],
+  ':':[[[2.2,4.6],[2.8,4.6]],[[2.2,1.6],[2.8,1.6]]],
+  ';':[[[2.2,4.6],[2.8,4.6]],[[2.8,1.2],[1.9,-0.4]]],
+  '(':[[[3.5,7],[1.5,5],[1.5,2],[3.5,0]]],
+  ')':[[[1.5,7],[3.5,5],[3.5,2],[1.5,0]]],
+  '+':[[[2.5,5.2],[2.5,1.8]],[[0.8,3.5],[4.2,3.5]]],
+  '=':[[[1,4.6],[4,4.6]],[[1,2.4],[4,2.4]]],
+  '*':[[[2.5,5.5],[2.5,2.5]],[[1.2,5],[3.8,3]],[[3.8,5],[1.2,3]]],
+  '°':[[[1.6,6],[1.1,6.5],[1.6,7],[2.1,6.5],[1.6,6]]],
+  '²':[[[0.6,6.2],[1.2,7],[2,7],[2.6,6.2],[0.6,5],[2.6,5]]],
+  '#':[[[1.4,7],[0.9,0]],[[3.4,7],[2.9,0]],[[0.4,5],[4.4,5]],[[0.2,2.4],[4.2,2.4]]],
+  '!':[[[2.5,7],[2.5,1.8]],[[2.5,0],[2.5,0.4]]],
+  '?':[[[0.4,5.6],[1.6,7],[3.4,7],[4.6,5.8],[4.6,4.8],[2.5,3.4],[2.5,1.8]],[[2.5,0],[2.5,0.4]]],
+  "'":[[[2.5,7],[2.5,5.6]]],
+  '"':[[[1.8,7],[1.8,5.6]],[[3.2,7],[3.2,5.6]]],
+  '&':[[[5,0],[1.4,4],[1.4,5.6],[2.4,7],[3.4,6],[3.4,4.8],[0.4,2.4],[0.4,1],[1.6,0],[3,0],[4.4,1.4]]],
+};
+
+// Remove acentos e normaliza para o conjunto disponível
+function txtNormalize(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // tira acentos
+    .replace(/[\u2012-\u2015\u2212]/g, '-')             // travessões e menos
+    .replace(/[\u2018\u2019]/g, "'")                    // aspas curvas
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u00BA\u00AA]/g, '°')                    // ordinal -> grau
+    .toUpperCase();
+}
+
+/* Converte o texto em polilinhas na grade dos glifos, já aplicando
+   escala (altura da letra em metros), rotação e centragem: a origem
+   fica no MEIO do texto, para ele girar em torno do próprio centro. */
+function textToPolylines(text, letterHeight, rotationDeg) {
+  const lines = txtNormalize(text).split('\n');
+  const scale = letterHeight / GLYPH_H;
+  const lineGap = GLYPH_H * 1.6;
+
+  // Mede cada linha para poder centralizar
+  const widths = lines.map((ln) => {
+    let w = 0;
+    for (const ch of ln) w += (ch === ' ') ? SPACE_ADV : GLYPH_ADV;
+    return w > 0 ? w - (GLYPH_ADV - GLYPH_W) : 0;
+  });
+  const maxW = Math.max(...widths, 0);
+  const totalH = (lines.length - 1) * lineGap + GLYPH_H;
+
+  const out = [];
+  lines.forEach((ln, li) => {
+    let cursor = -widths[li] / 2;                       // centraliza a linha
+    const baseY = totalH / 2 - GLYPH_H - li * lineGap;  // centraliza o bloco
+    for (const ch of ln) {
+      if (ch === ' ') { cursor += SPACE_ADV; continue; }
+      const g = GLYPHS[ch];
+      if (g) {
+        g.forEach((poly) => {
+          out.push(poly.map(([x, y]) => [(x + cursor) * scale, (y + baseY) * scale]));
+        });
+      }
+      cursor += GLYPH_ADV;
+    }
+  });
+
+  // Rotação em torno da origem (centro do texto)
+  const th = (rotationDeg || 0) * Math.PI / 180;
+  if (!th) return out;
+  const cos = Math.cos(th), sin = Math.sin(th);
+  return out.map((poly) => poly.map(([x, y]) => [x * cos - y * sin, x * sin + y * cos]));
+}
+
+// Metros -> graus, com correção de latitude (fixar 111320 introduz erro de escala)
+function metersToLngLat(originLng, originLat, dxM, dyM) {
+  const latRad = originLat * Math.PI / 180;
+  const mPerDegLat = 111132.92 - 559.82 * Math.cos(2 * latRad) + 1.175 * Math.cos(4 * latRad);
+  const mPerDegLng = 111412.84 * Math.cos(latRad) - 93.5 * Math.cos(3 * latRad);
+  return [originLng + dxM / mPerDegLng, originLat + dyM / mPerDegLat];
+}
+
+// Centro da viewport — onde o texto nasce
+function viewportCenter() {
+  try {
+    const mv = giraffeState.get('mapView');
+    if (Array.isArray(mv?.center) && mv.center.length >= 2) return [mv.center[0], mv.center[1]];
+    const b = mv?.bounds;
+    if (Array.isArray(b)) return [(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2];
+  } catch (e) { /* ignora */ }
+  return null;
+}
+
+// Monta as features de linha de um texto
+function buildTextFeatures(opts) {
+  const { text, letterHeight, rotation, elev, color, weight, origin, textId, layerId } = opts;
+  const polys = textToPolylines(text, letterHeight, rotation);
+  if (!polys.length) return [];
+
+  return polys.map((poly, i) => ({
+    type: 'Feature',
+    geometry: {
+      type: 'LineString',
+      coordinates: poly.map(([dx, dy]) => metersToLngLat(origin[0], origin[1], dx, dy)),
+    },
+    properties: {
+      layerId: layerId || 'default',
+      public: true,
+      _visible: true,
+      // Chaves confirmadas para linha flutuante em 3D
+      stroke: color,
+      'stroke-width': weight,
+      'stroke-opacity': 1,
+      baseHeight: elev,
+      _baseHeight: elev,
+      height: 0,
+      // Controle do módulo — permite recarregar, editar e apagar
+      sp_tag: TXT_TAG,
+      sp_textId: textId,
+      kv_text: text,
+      kv_size: letterHeight,
+      kv_rotation: rotation,
+      kv_elev: elev,
+      kv_color: color,
+      kv_weight: weight,
+      kv_origin: origin,
+      name: `${textId}_${i + 1}`,
+    },
+  }));
+}
+
+function txtReadFields() {
+  return {
+    text: $('txtContent').value,
+    letterHeight: Math.max(0.1, parseFloat($('txtSize').value) || 10),
+    rotation: parseFloat($('txtRotation').value) || 0,
+    elev: parseFloat($('txtElev').value) || 0,
+    color: $('txtColor').value || '#000000',
+    weight: Math.max(0.5, parseFloat($('txtWeight').value) || 2),
+  };
+}
+
+function txtSetStatus(html) { $('txtStatus').innerHTML = html; }
+
+let txtLoadedId = null;   // texto carregado para edição
+
+// Remove do projeto todas as linhas de um texto (ou de todos)
+async function deleteTextSections(textId) {
+  let raw;
+  try { raw = giraffeState.get('rawSections'); } catch (e) { return 0; }
+  let list = [];
+  if (Array.isArray(raw)) list = raw;
+  else if (raw && Array.isArray(raw.features)) list = raw.features;
+  else if (raw && typeof raw === 'object') list = Object.values(raw);
+
+  const ids = list
+    .filter((f) => f?.properties?.sp_tag === TXT_TAG
+      && (!textId || f.properties.sp_textId === textId))
+    .map((f) => f.id || f.properties?.id)
+    .filter(Boolean);
+  if (!ids.length) return 0;
+
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('deleteRawSections', [ids]);
+    return ids.length;
+  } catch (e) {
+    log('Falha ao remover texto: ' + e.message, true);
+    return 0;
+  } finally {
+    releaseSelfWriting();
+  }
+}
+
+async function createText(origin, textId) {
+  const f = txtReadFields();
+  if (!f.text.trim()) { log('Digite um texto antes de criar.', true); return false; }
+
+  const feats = buildTextFeatures({
+    ...f, origin, textId,
+    layerId: $('layerSelect').value || 'default',
+  });
+  if (!feats.length) { log('Nenhum caractere reconhecido no texto.', true); return false; }
+
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('createRawSections', [feats]);
+    log(`Texto criado: ${feats.length} traço(s), altura ${f.letterHeight} m, rotação ${f.rotation}°.`);
+    return true;
+  } catch (e) {
+    log('createRawSections (texto) falhou: ' + e.message, true);
+    return false;
+  } finally {
+    releaseSelfWriting();
+  }
+}
+
+$('btnTxtCreate').onclick = async () => {
+  const c = viewportCenter();
+  if (!c) { log('Não foi possível obter o centro da tela.', true); return; }
+  const textId = `kv_text_${Date.now()}`;
+  if (await createText(c, textId)) {
+    txtLoadedId = textId;
+    txtSetStatus('<span>Texto criado e carregado para edição. Altere os campos e use <span class="accent">Aplicar Alterações</span>.</span>');
+  }
+};
+
+$('btnTxtLoad').onclick = async () => {
+  const feats = await readSelection();
+  const hit = feats.find((f) => f?.properties?.sp_tag === TXT_TAG);
+  if (!hit) {
+    log('Selecione no mapa uma parte de um texto criado por este módulo.', true);
+    return;
+  }
+  const p = hit.properties;
+  txtLoadedId = p.sp_textId || null;
+  $('txtContent').value = p.kv_text || '';
+  $('txtSize').value = p.kv_size ?? 10;
+  $('txtRotation').value = p.kv_rotation ?? 0;
+  $('txtElev').value = p.kv_elev ?? 0;
+  $('txtColor').value = p.kv_color || '#000000';
+  $('txtWeight').value = p.kv_weight ?? 2;
+  txtSetStatus(`<span>Texto carregado: <span class="accent">${txtNormalize(p.kv_text || '').slice(0, 30)}</span></span>`);
+  log('Texto carregado para edição.');
+};
+
+$('btnTxtApply').onclick = async () => {
+  if (!txtLoadedId) { log('Nenhum texto carregado. Use Carregar Selecionado.', true); return; }
+
+  // Recupera a origem gravada, para o texto não saltar de lugar ao editar
+  let origin = null;
+  try {
+    let raw = giraffeState.get('rawSections');
+    let list = Array.isArray(raw) ? raw
+      : (raw && Array.isArray(raw.features)) ? raw.features
+      : (raw && typeof raw === 'object') ? Object.values(raw) : [];
+    const hit = list.find((f) => f?.properties?.sp_textId === txtLoadedId);
+    if (Array.isArray(hit?.properties?.kv_origin)) origin = hit.properties.kv_origin;
+  } catch (e) { /* ignora */ }
+  if (!origin) origin = viewportCenter();
+  if (!origin) { log('Não foi possível determinar a posição do texto.', true); return; }
+
+  // Editar = apagar e recriar: a geometria de cada traço muda por completo
+  await deleteTextSections(txtLoadedId);
+  if (await createText(origin, txtLoadedId)) {
+    txtSetStatus('<span>Alterações aplicadas.</span>');
+  }
+};
+
+$('btnTxtDelete').onclick = async () => {
+  let id = txtLoadedId;
+  if (!id) {
+    const feats = await readSelection();
+    const hit = feats.find((f) => f?.properties?.sp_tag === TXT_TAG);
+    id = hit?.properties?.sp_textId || null;
+  }
+  if (!id) { log('Nenhum texto carregado ou selecionado.', true); return; }
+  const n = await deleteTextSections(id);
+  txtLoadedId = null;
+  txtSetStatus('<span>Digite o texto e clique em Criar. Ele nasce no centro da tela.</span>');
+  log(`Texto removido (${n} traço(s)).`);
+};
+
+$('btnTxtDeleteAll').onclick = async () => {
+  const n = await deleteTextSections(null);
+  txtLoadedId = null;
+  txtSetStatus('<span>Digite o texto e clique em Criar. Ele nasce no centro da tela.</span>');
+  log(n ? `Todos os textos removidos (${n} traço(s)).` : 'Nenhum texto encontrado.');
+};
 
 /* =========================================================
    ABAS — troca de painel (não interfere na lógica existente)
