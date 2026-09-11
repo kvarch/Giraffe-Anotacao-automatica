@@ -760,6 +760,24 @@ main {
           Sondar Histórico
         </button>
       </div>
+
+      <hr class="kv-divider" />
+
+      <p class="kv-label" style="margin-bottom:6px">Sonda: texto deitado no plano</p>
+      <p class="kv-helper">
+        Cria seis variantes de texto no centro da tela, cada uma com um conjunto
+        diferente de chaves de alinhamento e rotação. Veja no mapa, em vista 3D
+        inclinada, qual delas <strong>deita no plano</strong> em vez de encarar
+        a câmera — e informe o número. Depois use Remover para limpar.
+      </p>
+      <div class="btn-row">
+        <button id="btnProbeText" class="btn-ghost" aria-label="Criar variantes de teste de texto">
+          Criar Variantes
+        </button>
+        <button id="btnProbeTextClear" class="btn-ghost" aria-label="Remover variantes de teste">
+          Remover
+        </button>
+      </div>
       <div style="margin-top:12px">
         <label class="kv-label" for="syncDelay">Atraso da sincronização (ms)</label>
         <select id="syncDelay" class="kv-input" aria-label="Atraso da sincronização">
@@ -796,7 +814,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V56 · © 2026 Königsberger Vannucchi
+  Beta V57 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -2868,6 +2886,150 @@ $('btnClearPopup').onclick = async () => {
   log(n
     ? `Popup removido de ${n} elemento(s) — não reaparece mais ao clicar neles.`
     : 'Os elementos selecionados não tinham popup registrado (popup em tela foi fechado).');
+};
+
+
+/* =========================================================
+   SONDA — TEXTO DEITADO NO PLANO (pitch/rotation alignment)
+   Os marcadores do Giraffe usam renderMode 'screen' (billboard: o texto
+   encara sempre a câmera). Por baixo é Mapbox, que tem
+   text-pitch-alignment / text-rotation-alignment = 'map' para deitar o
+   rótulo no plano do terreno, e text-rotate para o ângulo.
+
+   Não há documentação sobre o marker.value repassar essas chaves. Esta
+   sonda cria seis variantes lado a lado para descobrir empiricamente
+   qual — se alguma — funciona. É o mesmo método que revelou spriteUrl
+   e mapView.
+   ========================================================= */
+const PROBE_TAG = 'kv_probe_text';
+
+function probeTextSpriteSvg(label) {
+  const W = 320, H = 64;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`
+    + `<rect x="0" y="0" width="${W}" height="${H}" fill="#FFFFFF" fill-opacity="0.85" stroke="#00ACCD" stroke-width="2"/>`
+    + `<text x="10" y="42" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="#000">${label}</text>`
+    + `</svg>`;
+}
+
+function probeTextPng(label) {
+  return new Promise((resolve, reject) => {
+    const svg = probeTextSpriteSvg(label);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = 320 * 3; c.height = 64 * 3;
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('falha ao rasterizar'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
+
+// Centro da viewport + deslocamentos para as variantes não se sobreporem
+function probeOrigin() {
+  const mv = giraffeState.get('mapView');
+  const b = mv?.bounds;
+  if (!Array.isArray(b)) return null;
+  const west = b[0][0], south = b[0][1], east = b[1][0], north = b[1][1];
+  return { lng: (west + east) / 2, lat: (south + north) / 2,
+           stepLng: (east - west) / 9, stepLat: (north - south) / 9 };
+}
+
+$('btnProbeText').onclick = async () => {
+  const o = probeOrigin();
+  if (!o) { log('mapView indisponível — não foi possível posicionar a sonda.', true); return; }
+
+  const layerId = $('layerSelect').value || 'default';
+  const ROT = 30;   // rotação de teste, em graus
+
+  // Cada variante testa uma hipótese diferente sobre como o Giraffe
+  // repassa alinhamento e rotação ao Mapbox.
+  const variants = [
+    { n: 1, note: 'renderMode map',
+      extra: { renderMode: 'map', rotation: ROT } },
+    { n: 2, note: 'pitchAlignment/rotationAlignment map',
+      extra: { renderMode: 'map', pitchAlignment: 'map', rotationAlignment: 'map', rotation: ROT } },
+    { n: 3, note: 'text-pitch-alignment (kebab, nomes Mapbox)',
+      extra: { 'text-pitch-alignment': 'map', 'text-rotation-alignment': 'map', 'text-rotate': ROT } },
+    { n: 4, note: 'icon-pitch-alignment (kebab, ícone)',
+      extra: { 'icon-pitch-alignment': 'map', 'icon-rotation-alignment': 'map', 'icon-rotate': ROT } },
+    { n: 5, note: 'flat + bearing',
+      extra: { flat: true, bearing: ROT, renderMode: 'map' } },
+    { n: 6, note: 'controle: screen (comportamento atual)',
+      extra: { renderMode: 'screen', rotation: ROT } },
+  ];
+
+  const feats = [];
+  for (const v of variants) {
+    let png;
+    try { png = await probeTextPng(`${v.n} — TEXTO`); } catch (e) { continue; }
+    feats.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [o.lng + o.stepLng * (v.n - 3.5), o.lat] },
+      properties: {
+        type: 'genericPoint',
+        usage: 'Pin',
+        radius: 0.1,
+        layerId,
+        public: true,
+        _visible: true,
+        baseHeight: 0,
+        _baseHeight: 0,
+        marker: {
+          kind: 'icon',
+          value: {
+            spriteUrl: png,
+            spriteSize: 64,
+            scale: 2,
+            onTop: true,
+            stick: false,
+            stickHeight: 0,
+            anchor: 'center',
+            ...v.extra,
+          },
+        },
+        sp_tag: PROBE_TAG,
+        name: `kv_probe_${v.n}`,
+      },
+    });
+  }
+
+  if (!feats.length) { log('Nenhuma variante pôde ser criada.', true); return; }
+
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('createRawSections', [feats]);
+    log(`Sonda criada: ${feats.length} variantes no centro da tela.`);
+    variants.forEach((v) => log(`  ${v.n} — ${v.note}`));
+    log('Incline a câmera para 3D e veja qual deita no plano. Informe o número.');
+  } catch (e) {
+    log('Falha ao criar a sonda: ' + e.message, true);
+  } finally {
+    releaseSelfWriting();
+  }
+};
+
+$('btnProbeTextClear').onclick = async () => {
+  try {
+    let raw = giraffeState.get('rawSections');
+    let list = [];
+    if (Array.isArray(raw)) list = raw;
+    else if (raw && Array.isArray(raw.features)) list = raw.features;
+    else if (raw && typeof raw === 'object') list = Object.values(raw);
+    const ids = list
+      .filter((f) => f?.properties?.sp_tag === PROBE_TAG)
+      .map((f) => f.id || f.properties?.id)
+      .filter(Boolean);
+    if (!ids.length) { log('Nenhuma variante de sonda encontrada.'); return; }
+    isSelfWriting = true;
+    await rpc.invoke('deleteRawSections', [ids]);
+    log(`Sonda removida (${ids.length} variante(s)).`);
+  } catch (e) {
+    log('Falha ao remover a sonda: ' + e.message, true);
+  } finally {
+    releaseSelfWriting();
+  }
 };
 
 $('btnInspect').onclick = async () => {
