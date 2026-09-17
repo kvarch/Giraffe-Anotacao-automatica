@@ -895,7 +895,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V58 · © 2026 Königsberger Vannucchi
+  Beta V59 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -955,7 +955,9 @@ function restoreUiState() {
   if (typeof state.outLabel === 'boolean') $('outLabel').checked = state.outLabel;
   if (typeof state.outNivel === 'boolean') $('outNivel').checked = state.outNivel;
   if (typeof state.infoOnlyFilled === 'boolean') $('infoOnlyFilled').checked = state.infoOnlyFilled;
-  if (state.seaLevel !== undefined) $('seaLevel').value = state.seaLevel;
+  // A cota base é por projeto (applySeaForProject); só serve de ponto de
+  // partida enquanto o projeto não foi identificado.
+  if (state.seaLevel !== undefined && !currentProjectKey) $('seaLevel').value = state.seaLevel;
   if (state.textSize !== undefined) $('textSize').value = state.textSize;
   if (state.updateMode) {
     const radio = document.querySelector(`input[name="updMode"][value="${state.updateMode}"]`);
@@ -2730,6 +2732,7 @@ function setupAutoSync() {
   }
 
   // Mudança na cota base também dispara sincronização (Nível da Base/Topo)
+  $('seaLevel').addEventListener('input', saveSeaForProject);
   $('seaLevel').addEventListener('input', () => {
     if (!$('autoSync').checked) return;
     scheduleSync();
@@ -2775,6 +2778,22 @@ function findCameraSignals(v, path = '', depth = 0, seen = new Set(), hits = [])
 
 $('btnDiagView').onclick = async () => {
   log('══════ DIAGNÓSTICO DE VISTA (varredura ampla) ══════');
+
+  // Identificação do projeto — base da cota base por projeto
+  {
+    const key = detectProjectKey();
+    log(`projeto identificado como: ${key || 'NÃO identificado (cota base fica geral)'}`);
+    const map = readSeaMap();
+    const n = Object.keys(map).length;
+    log(`cotas base gravadas (${n}): ${n ? Object.entries(map).map(([k, v]) => `${k}=${v}`).join(' | ').slice(0, 300) : '—'}`);
+    try {
+      const pr = giraffeState.get('project');
+      if (pr?.properties) {
+        log(`project.properties: ${Object.keys(pr.properties).slice(0, 30).join(', ')}`);
+      }
+    } catch (e) { /* ignora */ }
+  }
+
   log(`modo atual: ${currentViewMode.toUpperCase()} | seletor: ${symbolModeSetting()}`);
 
   // ── 1. Varredura ampla de chaves do giraffeState ──
@@ -3569,6 +3588,69 @@ $('btnTxtDeleteAll').onclick = async () => {
   log(n ? `Todos os textos removidos (${n} traço(s)).` : 'Nenhum texto encontrado.');
 };
 
+
+/* =========================================================
+   COTA BASE POR PROJETO
+   O estado da interface é salvo numa chave única do localStorage, que
+   vale para todos os projetos. Para a cota base isso está errado: ela é
+   uma característica do terreno, e cada projeto tem a sua.
+
+   Aqui a cota fica num mapa indexado pelo id do projeto. A estrutura do
+   objeto 'project' varia conforme a versão do Giraffe, então o id é
+   procurado em vários caminhos; sem id, o app volta ao comportamento
+   antigo (valor único), em vez de perder o dado.
+   ========================================================= */
+const SEA_BY_PROJECT_STORE = 'kv_annot_sea_by_project';
+let currentProjectKey = null;
+
+function detectProjectKey() {
+  let pr;
+  try { pr = giraffeState.get('project'); } catch (e) { return null; }
+  if (!pr) return null;
+  const p = pr.properties || {};
+  const cand = [
+    pr.id, p.id, p.project_id, p.projectId, p.uuid, p.key, p.slug,
+    p.name && p.city ? `${p.city}/${p.name}` : null,
+    p.name,
+  ];
+  for (const c of cand) {
+    if (c !== undefined && c !== null && String(c).trim()) return String(c).trim();
+  }
+  return null;
+}
+
+function readSeaMap() {
+  try { return JSON.parse(localStorage.getItem(SEA_BY_PROJECT_STORE) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+
+function saveSeaForProject() {
+  if (!currentProjectKey) return;
+  const map = readSeaMap();
+  map[currentProjectKey] = $('seaLevel').value;
+  try { localStorage.setItem(SEA_BY_PROJECT_STORE, JSON.stringify(map)); } catch (e) { /* cheio */ }
+}
+
+// Aplica a cota gravada para este projeto (se houver)
+function applySeaForProject(silent) {
+  const key = detectProjectKey();
+  if (!key) {
+    if (!silent) log('Projeto não identificado — a cota base fica com o valor geral.');
+    return;
+  }
+  if (key === currentProjectKey) return;
+  currentProjectKey = key;
+
+  const map = readSeaMap();
+  if (Object.prototype.hasOwnProperty.call(map, key)) {
+    $('seaLevel').value = map[key];
+    log(`Cota base deste projeto: ${map[key]} m.`);
+  } else {
+    // Primeira vez neste projeto: registra o valor que está na tela
+    saveSeaForProject();
+  }
+}
+
 /* =========================================================
    ABAS — troca de painel (não interfere na lógica existente)
    ========================================================= */
@@ -3647,6 +3729,12 @@ function setupTabs() {
   // Persiste qualquer mudança de UI automaticamente
   document.body.addEventListener('change', saveUiState);
   $('infoOnlyFilled').addEventListener('change', () => renderInfoPanel(infoLastFeats));
+  applySeaForProject(true);
+  try {
+    // O projeto pode chegar depois da carga do app
+    giraffeState.addListener(['project'], () => applySeaForProject(true));
+  } catch (e) { /* chave indisponível nesta versão */ }
+
   const feats = await readSelection();
   updateSelStatus(feats);
   renderInfoPanel(feats);   // preenche o painel se a aba já estiver aberta
