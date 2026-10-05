@@ -895,7 +895,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V59 · © 2026 Königsberger Vannucchi
+  Beta V60 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -1100,34 +1100,58 @@ async function resolveProps(feature, keys) {
   const p = feature.properties || {};
   const out = {};
 
-  // Altura na base: _baseHeight (avaliada, inclui stack) → baseHeight (raw)
-  const resolveBaseHeight = () => {
-    if (typeof p._baseHeight === 'number') return Math.round(p._baseHeight * 100) / 100;
-    return getProp(feature, 'baseHeight');
+  // Converte número OU string numérica ("42.0" vem assim em alguns casos).
+  // O teste antigo era typeof === 'number', e por isso elementos com
+  // stack order ficavam sem Altura na Base e sem Nível da Base.
+  const num = (v) => {
+    if (typeof v === 'number' && isFinite(v)) return Math.round(v * 100) / 100;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v.replace(',', '.'));
+      if (isFinite(n)) return Math.round(n * 100) / 100;
+    }
+    return null;
   };
 
-  // Topo (cota absoluta): _height avaliada JÁ inclui base/stack — usar direto.
-  // Fallback raw: base + corpo (height ou levels × floorToFloor)
+  // Altura na base: a avaliada manda, porque é ela que inclui o stack.
+  // Várias chaves candidatas — o engine não é consistente entre versões.
+  const resolveBaseHeight = () => {
+    for (const k of ['_baseHeight', 'baseHeight', '_baseElevation', 'baseElevation']) {
+      const v = num(p[k]);
+      if (v !== null) return v;
+    }
+    return null;
+  };
+
+  // Corpo do elemento: height bruto, ou pavimentos × piso a piso
+  const resolveBody = () => {
+    const h = num(p.height);
+    if (h !== null && h > 0) return h;
+    const lv = num(p.levels), ff = num(p.floorToFloor);
+    if (lv !== null && ff !== null && lv > 0 && ff > 0) {
+      return Math.round(lv * ff * 100) / 100;
+    }
+    return null;
+  };
+
+  // Topo (cota absoluta) = BASE + CORPO.
+  // A avaliada _height já vem somada, então serve direto — mas só é
+  // aceita se for coerente com a base (nunca abaixo dela).
   const resolveTopHeight = () => {
-    if (typeof p._height === 'number' && p._height > 0) {
-      return Math.round(p._height * 100) / 100;   // avaliada = topo absoluto
-    }
-    let t = getProp(feature, 'topHeight');
+    const b = resolveBaseHeight();
+    const body = resolveBody();
+
+    // Soma explícita: é a regra que vale, e a que o usuário espera ver
+    if (b !== null && body !== null) return Math.round((b + body) * 100) / 100;
+
+    const ev = num(p._height);
+    if (ev !== null && ev > 0 && (b === null || ev >= b)) return ev;
+
+    const t = num(p.topHeight) ?? num(p._topHeight);
     if (t !== null) return t;
-    if (typeof p._topHeight === 'number') return Math.round(p._topHeight * 100) / 100;
-    let h = getProp(feature, 'height');
-    if (h === null) {
-      const lv = Number(p.levels), ff = Number(p.floorToFloor);
-      if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) h = lv * ff;
-    }
-    if (h === null) {
-      // Geometria sem corpo (Point, linha, polígono plano): o topo COINCIDE
-      // com a base. Antes retornava null e o rótulo não era criado.
-      const b = resolveBaseHeight();
-      return b === null ? null : b;
-    }
-    const b = resolveBaseHeight() || 0;
-    return Math.round((h + b) * 100) / 100;
+
+    if (body !== null) return Math.round((body + (b || 0)) * 100) / 100;
+    // Geometria sem corpo (ponto, linha, polígono plano): topo = base
+    return b;
   };
 
   const cotaBase = () => parseFloat($('seaLevel').value) || 0;
@@ -1135,16 +1159,12 @@ async function resolveProps(feature, keys) {
   // Altura do PRÓPRIO elemento (corpo), sem a base e sem a cota do mar:
   // height bruto, ou pavimentos × piso a piso.
   const resolveBodyHeight = () => {
-    let h = getProp(feature, 'height');
-    if (h !== null) return h;
-    const lv = Number(p.levels), ff = Number(p.floorToFloor);
-    if (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) {
-      return Math.round(lv * ff * 100) / 100;
-    }
+    const body = resolveBody();
+    if (body !== null) return body;
     // Sem corpo declarado: deriva do topo avaliado menos a base
-    const t = resolveTopHeight(), b = resolveBaseHeight();
-    if (t !== null && b !== null) {
-      const d = Math.round((t - b) * 100) / 100;
+    const ev = num(p._height), b = resolveBaseHeight();
+    if (ev !== null && b !== null) {
+      const d = Math.round((ev - b) * 100) / 100;
       if (d > 0) return d;
     }
     return null;
@@ -3248,12 +3268,25 @@ async function renderInfoPanel(feats) {
       return `<tr><th>${escapeHtml(p.pt)}</th><td>${cell}</td></tr>`;
     }).filter(Boolean).join('');
 
+    // Diagnóstico: as chaves de cota que o engine entregou nesta feature.
+    // Serve para conferir de onde saíram os valores em elementos com stack.
+    const p = f.properties || {};
+    const rawKeys = Object.keys(p)
+      .filter((k) => /height|elev|stack|level|floor/i.test(k))
+      .sort()
+      .map((k) => `${escapeHtml(k)}: ${escapeHtml(String(p[k]))}`)
+      .join('<br>');
+
     parts.push(`<div class="info-card">
       <div class="info-card-head">
         <span class="info-title">${escapeHtml(title)}</span>
         <span class="info-geom">${escapeHtml(geom)}</span>
       </div>
       <table class="info-table">${rows || '<tr><td class="info-empty">Sem propriedades com valor.</td></tr>'}</table>
+      ${rawKeys ? `<details style="margin-top:8px">
+        <summary style="font-size:11px;cursor:pointer;color:var(--md-sys-color-on-surface-variant)">chaves de cota (origem dos valores)</summary>
+        <div style="font-family:'Courier New',monospace;font-size:10px;line-height:1.6;margin-top:6px;color:var(--md-sys-color-on-surface-variant)">${rawKeys}</div>
+      </details>` : ''}
     </div>`);
   }
 
