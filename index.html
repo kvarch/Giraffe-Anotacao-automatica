@@ -895,7 +895,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V61 · © 2026 Königsberger Vannucchi
+  Beta V62 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -3245,28 +3245,39 @@ async function evaluateForInfo(feats) {
   });
   if (!needs) return feats;
 
+  let out = [];
   try {
     const r = await rpc.invoke('evaluateFeatures', [feats]);
-    let out = [];
     if (Array.isArray(r)) out = r;
     else if (r?.features) out = r.features;
     else if (r && typeof r === 'object') out = Object.values(r);
-    if (!out.length) return feats;
-
-    const byId = {};
-    out.forEach((f) => {
-      const id = f?.id || f?.properties?.id;
-      if (id) byId[id] = f;
-    });
-    // Casa por id; se o retorno vier na mesma ordem, usa o índice
-    return feats.map((f, i) => {
-      const id = f.id || f.properties?.id;
-      return byId[id] || out[i] || f;
-    });
   } catch (e) {
-    log('evaluateFeatures indisponível — elementos empilhados podem ficar sem cota.', true);
-    return feats;
+    return feats;   // indisponível: segue com as originais, sem quebrar nada
   }
+
+  // Índice pelo id — casamento por posição foi o que estragava os dados
+  const byId = {};
+  out.forEach((f) => {
+    const id = f?.id || f?.properties?.id;
+    if (id) byId[id] = f;
+  });
+
+  // NUNCA substituir a feature: a avaliada pode vir em outro formato e
+  // levar embora levels, floorToFloor, name etc. Só COPIAMOS as chaves
+  // de cota, e só quando forem números válidos.
+  const COTA = ['_baseHeight', '_height', '_topHeight', '_baseElevation'];
+  return feats.map((f) => {
+    const id = f.id || f.properties?.id;
+    const ev = id ? byId[id] : null;
+    const ep = ev?.properties || ev || {};
+    const extra = {};
+    COTA.forEach((k) => {
+      const v = ep[k];
+      if (typeof v === 'number' && isFinite(v)) extra[k] = v;
+    });
+    if (!Object.keys(extra).length) return f;
+    return { ...f, properties: { ...(f.properties || {}), ...extra } };
+  });
 }
 
 /* Último recurso: se nem evaluateFeatures devolver a cota, somamos nós
@@ -3338,11 +3349,13 @@ async function renderInfoPanel(feats) {
   const keys = DEFAULT_PROPS.map((p) => p.key);
   const parts = [];
 
-  // Avalia antes de resolver — sem isto, elemento empilhado vem sem cota
-  infoLastFeats = await evaluateForInfo(infoLastFeats);
+  // Avalia antes de resolver — sem isto, elemento empilhado vem sem cota.
+  // Trabalha numa cópia LOCAL: a lista global guarda a seleção original,
+  // para cada redesenho partir de dados limpos.
+  let work = await evaluateForInfo(infoLastFeats);
 
   // Se ainda faltar a cota num elemento empilhado, somamos a pilha
-  infoLastFeats = infoLastFeats.map((f) => {
+  work = work.map((f) => {
     const p = f?.properties || {};
     if (p._baseHeight !== undefined || p.baseHeight !== undefined) return f;
     const b = stackBaseFallback(f);
@@ -3351,7 +3364,7 @@ async function renderInfoPanel(feats) {
   });
 
   for (let i = 0; i < shown; i++) {
-    const f = infoLastFeats[i];
+    const f = work[i];   // feature já avaliada / com a pilha somada
     let values = {};
     try { values = await resolveProps(f, keys); } catch (e) { /* segue com vazio */ }
 
