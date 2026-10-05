@@ -895,7 +895,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V62 · © 2026 Königsberger Vannucchi
+  Beta V63 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -3225,103 +3225,66 @@ function escapeHtml(s) {
 }
 
 
-/* ─── AVALIAÇÃO DAS FEATURES DO PAINEL ─────────────────────────────
-   Num elemento com stackOrder, a feature bruta traz só levels,
-   floorToFloor e a ordem na pilha — a cota da base depende do que está
-   embaixo, e apenas o engine sabe somar. Sem avaliar, Altura na Base e
-   Nível da Base ficam vazios, e o topo sai errado.
+/* ─── FONTE DAS FEATURES DO PAINEL ─────────────────────────────────
+   Réplica fiel da cadeia que a sincronização dos rótulos usa em
+   updatePoints — a mesma que produz as cotas corretas na aba Anotações:
 
-   É a mesma cadeia que a sincronização dos rótulos usa desde a v21:
-   evaluateFeatures devolve as features com _baseHeight e _height
-   calculados. O painel pulava essa etapa — daí a diferença entre o que
-   o rótulo mostrava e o que o painel mostrava.                        */
-async function evaluateForInfo(feats) {
-  if (!feats || !feats.length) return feats || [];
+     1. getEvaluatedFeaturesMap() — features já avaliadas pelo engine,
+        lidas do giraffeState (bakedSections, sections, ...);
+     2. evaluateFeatures chamado com a feature do rawSections;
+     3. a feature da seleção, como último recurso.
 
-  // Já avaliadas? Nada a fazer.
-  const needs = feats.some((f) => {
-    const p = f?.properties || {};
-    return p._baseHeight === undefined && p._height === undefined;
-  });
-  if (!needs) return feats;
+   Nas v61/v62 eu tinha inventado um caminho próprio, que pulava a
+   fonte 1 e chamava evaluateFeatures com a feature da seleção — por
+   isso o painel divergia dos rótulos. As propriedades da avaliada são
+   sobrepostas às da seleção, nunca o contrário, e nada se perde.     */
+async function resolveInfoSources(selFeats) {
+  if (!selFeats || !selFeats.length) return [];
 
-  let out = [];
-  try {
-    const r = await rpc.invoke('evaluateFeatures', [feats]);
-    if (Array.isArray(r)) out = r;
-    else if (r?.features) out = r.features;
-    else if (r && typeof r === 'object') out = Object.values(r);
-  } catch (e) {
-    return feats;   // indisponível: segue com as originais, sem quebrar nada
-  }
-
-  // Índice pelo id — casamento por posição foi o que estragava os dados
+  const all = getRawSectionFeatures();
   const byId = {};
-  out.forEach((f) => {
-    const id = f?.id || f?.properties?.id;
+  all.forEach((f) => {
+    const id = f.id || f.properties?.id;
     if (id) byId[id] = f;
   });
 
-  // NUNCA substituir a feature: a avaliada pode vir em outro formato e
-  // levar embora levels, floorToFloor, name etc. Só COPIAMOS as chaves
-  // de cota, e só quando forem números válidos.
-  const COTA = ['_baseHeight', '_height', '_topHeight', '_baseElevation'];
-  return feats.map((f) => {
-    const id = f.id || f.properties?.id;
-    const ev = id ? byId[id] : null;
-    const ep = ev?.properties || ev || {};
-    const extra = {};
-    COTA.forEach((k) => {
-      const v = ep[k];
-      if (typeof v === 'number' && isFinite(v)) extra[k] = v;
-    });
-    if (!Object.keys(extra).length) return f;
-    return { ...f, properties: { ...(f.properties || {}), ...extra } };
-  });
-}
+  // Fonte 1 — idêntica à de updatePoints
+  const evalMap = getEvaluatedFeaturesMap();
+  const evalFrom = {};
+  Object.keys(evalMap).forEach((id) => { evalFrom[id] = `giraffeState:${evalSourceKey || '?'}`; });
 
-/* Último recurso: se nem evaluateFeatures devolver a cota, somamos nós
-   mesmos os corpos dos elementos que estão ABAIXO na pilha. Elementos
-   empilhados compartilham o mesmo footprint, então os identificamos
-   pelo centróide coincidente e por um stackOrder menor. */
-function stackBaseFallback(feature) {
-  const p = feature?.properties || {};
-  const order = Number(p.stackOrder);
-  if (!isFinite(order) || order <= 0) return null;
-
-  const c = centroid(feature);
-  if (!c) return null;
-
-  let raw;
-  try { raw = giraffeState.get('rawSections'); } catch (e) { return null; }
-  let list = [];
-  if (Array.isArray(raw)) list = raw;
-  else if (raw && Array.isArray(raw.features)) list = raw.features;
-  else if (raw && typeof raw === 'object') list = Object.values(raw);
-  if (!list.length) return null;
-
-  const TOL = 1e-6;   // ~0,1 m — mesmo footprint
-  let soma = 0, achados = 0;
-
-  for (const f of list) {
-    const q = f?.properties || {};
-    const o = Number(q.stackOrder);
-    if (!isFinite(o) || o >= order) continue;
-    const cc = centroid(f);
-    if (!cc) continue;
-    if (Math.abs(cc[0] - c[0]) > TOL || Math.abs(cc[1] - c[1]) > TOL) continue;
-
-    const h = Number(q.height);
-    const lv = Number(q.levels), ff = Number(q.floorToFloor);
-    const corpo = (isFinite(h) && h > 0) ? h
-      : (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) ? lv * ff
-      : null;
-    if (corpo === null) continue;
-    soma += corpo;
-    achados++;
+  // Fonte 2 — evaluateFeatures com a feature do rawSections
+  const ids = selFeats.map((f) => f.id || f.properties?.id).filter(Boolean);
+  const missing = ids.filter((id) => !evalMap[id] && byId[id]);
+  if (missing.length) {
+    try {
+      const evaluated = await rpc.invoke('evaluateFeatures', [missing.map((id) => byId[id])]);
+      if (evaluated && typeof evaluated === 'object') {
+        const feats = Array.isArray(evaluated) ? evaluated
+          : evaluated.features ? evaluated.features
+          : Object.values(evaluated);
+        feats.forEach((f) => {
+          if (!f) return;
+          const id = f.id || f.properties?.id;
+          if (id && !evalMap[id]) { evalMap[id] = f; evalFrom[id] = 'evaluateFeatures'; }
+        });
+      }
+    } catch (e) { /* indisponível nesta versão — segue para a fonte 3 */ }
   }
 
-  return achados ? Math.round(soma * 100) / 100 : null;
+  // Fonte 3 — a seleção, com as propriedades avaliadas por cima
+  return selFeats.map((sel) => {
+    const id = sel.id || sel.properties?.id;
+    const ev = id ? evalMap[id] : null;
+    if (!ev) {
+      return { ...sel, properties: { ...(sel.properties || {}), sp_from: 'seleção (não avaliada)' } };
+    }
+    return {
+      ...sel,
+      geometry: ev.geometry || sel.geometry,
+      properties: { ...(sel.properties || {}), ...(ev.properties || {}), sp_from: evalFrom[id] },
+    };
+  });
 }
 
 async function renderInfoPanel(feats) {
@@ -3349,22 +3312,12 @@ async function renderInfoPanel(feats) {
   const keys = DEFAULT_PROPS.map((p) => p.key);
   const parts = [];
 
-  // Avalia antes de resolver — sem isto, elemento empilhado vem sem cota.
-  // Trabalha numa cópia LOCAL: a lista global guarda a seleção original,
-  // para cada redesenho partir de dados limpos.
-  let work = await evaluateForInfo(infoLastFeats);
-
-  // Se ainda faltar a cota num elemento empilhado, somamos a pilha
-  work = work.map((f) => {
-    const p = f?.properties || {};
-    if (p._baseHeight !== undefined || p.baseHeight !== undefined) return f;
-    const b = stackBaseFallback(f);
-    if (b === null) return f;
-    return { ...f, properties: { ...p, _baseHeight: b, sp_baseFrom: 'soma da pilha' } };
-  });
+  // Mesma cadeia de fontes da sincronização dos rótulos (ver acima).
+  // Cópia local: a lista global guarda a seleção original.
+  const work = await resolveInfoSources(infoLastFeats);
 
   for (let i = 0; i < shown; i++) {
-    const f = work[i];   // feature já avaliada / com a pilha somada
+    const f = work[i];   // feature resolvida pela mesma cadeia dos rótulos
     let values = {};
     try { values = await resolveProps(f, keys); } catch (e) { /* segue com vazio */ }
 
@@ -3386,7 +3339,7 @@ async function renderInfoPanel(feats) {
     // Serve para conferir de onde saíram os valores em elementos com stack.
     const p = f.properties || {};
     const rawKeys = Object.keys(p)
-      .filter((k) => /height|elev|stack|level|floor|baseFrom/i.test(k))
+      .filter((k) => /height|elev|stack|level|floor|_from/i.test(k))
       .sort()
       .map((k) => `${escapeHtml(k)}: ${escapeHtml(String(p[k]))}`)
       .join('<br>');
