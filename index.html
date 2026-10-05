@@ -895,7 +895,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V60 · © 2026 Königsberger Vannucchi
+  Beta V61 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -3224,6 +3224,95 @@ function escapeHtml(s) {
   ));
 }
 
+
+/* ─── AVALIAÇÃO DAS FEATURES DO PAINEL ─────────────────────────────
+   Num elemento com stackOrder, a feature bruta traz só levels,
+   floorToFloor e a ordem na pilha — a cota da base depende do que está
+   embaixo, e apenas o engine sabe somar. Sem avaliar, Altura na Base e
+   Nível da Base ficam vazios, e o topo sai errado.
+
+   É a mesma cadeia que a sincronização dos rótulos usa desde a v21:
+   evaluateFeatures devolve as features com _baseHeight e _height
+   calculados. O painel pulava essa etapa — daí a diferença entre o que
+   o rótulo mostrava e o que o painel mostrava.                        */
+async function evaluateForInfo(feats) {
+  if (!feats || !feats.length) return feats || [];
+
+  // Já avaliadas? Nada a fazer.
+  const needs = feats.some((f) => {
+    const p = f?.properties || {};
+    return p._baseHeight === undefined && p._height === undefined;
+  });
+  if (!needs) return feats;
+
+  try {
+    const r = await rpc.invoke('evaluateFeatures', [feats]);
+    let out = [];
+    if (Array.isArray(r)) out = r;
+    else if (r?.features) out = r.features;
+    else if (r && typeof r === 'object') out = Object.values(r);
+    if (!out.length) return feats;
+
+    const byId = {};
+    out.forEach((f) => {
+      const id = f?.id || f?.properties?.id;
+      if (id) byId[id] = f;
+    });
+    // Casa por id; se o retorno vier na mesma ordem, usa o índice
+    return feats.map((f, i) => {
+      const id = f.id || f.properties?.id;
+      return byId[id] || out[i] || f;
+    });
+  } catch (e) {
+    log('evaluateFeatures indisponível — elementos empilhados podem ficar sem cota.', true);
+    return feats;
+  }
+}
+
+/* Último recurso: se nem evaluateFeatures devolver a cota, somamos nós
+   mesmos os corpos dos elementos que estão ABAIXO na pilha. Elementos
+   empilhados compartilham o mesmo footprint, então os identificamos
+   pelo centróide coincidente e por um stackOrder menor. */
+function stackBaseFallback(feature) {
+  const p = feature?.properties || {};
+  const order = Number(p.stackOrder);
+  if (!isFinite(order) || order <= 0) return null;
+
+  const c = centroid(feature);
+  if (!c) return null;
+
+  let raw;
+  try { raw = giraffeState.get('rawSections'); } catch (e) { return null; }
+  let list = [];
+  if (Array.isArray(raw)) list = raw;
+  else if (raw && Array.isArray(raw.features)) list = raw.features;
+  else if (raw && typeof raw === 'object') list = Object.values(raw);
+  if (!list.length) return null;
+
+  const TOL = 1e-6;   // ~0,1 m — mesmo footprint
+  let soma = 0, achados = 0;
+
+  for (const f of list) {
+    const q = f?.properties || {};
+    const o = Number(q.stackOrder);
+    if (!isFinite(o) || o >= order) continue;
+    const cc = centroid(f);
+    if (!cc) continue;
+    if (Math.abs(cc[0] - c[0]) > TOL || Math.abs(cc[1] - c[1]) > TOL) continue;
+
+    const h = Number(q.height);
+    const lv = Number(q.levels), ff = Number(q.floorToFloor);
+    const corpo = (isFinite(h) && h > 0) ? h
+      : (isFinite(lv) && isFinite(ff) && lv > 0 && ff > 0) ? lv * ff
+      : null;
+    if (corpo === null) continue;
+    soma += corpo;
+    achados++;
+  }
+
+  return achados ? Math.round(soma * 100) / 100 : null;
+}
+
 async function renderInfoPanel(feats) {
   infoLastFeats = feats || [];
   if (!infoPanelVisible()) { infoPending = true; return; }
@@ -3249,6 +3338,18 @@ async function renderInfoPanel(feats) {
   const keys = DEFAULT_PROPS.map((p) => p.key);
   const parts = [];
 
+  // Avalia antes de resolver — sem isto, elemento empilhado vem sem cota
+  infoLastFeats = await evaluateForInfo(infoLastFeats);
+
+  // Se ainda faltar a cota num elemento empilhado, somamos a pilha
+  infoLastFeats = infoLastFeats.map((f) => {
+    const p = f?.properties || {};
+    if (p._baseHeight !== undefined || p.baseHeight !== undefined) return f;
+    const b = stackBaseFallback(f);
+    if (b === null) return f;
+    return { ...f, properties: { ...p, _baseHeight: b, sp_baseFrom: 'soma da pilha' } };
+  });
+
   for (let i = 0; i < shown; i++) {
     const f = infoLastFeats[i];
     let values = {};
@@ -3272,7 +3373,7 @@ async function renderInfoPanel(feats) {
     // Serve para conferir de onde saíram os valores em elementos com stack.
     const p = f.properties || {};
     const rawKeys = Object.keys(p)
-      .filter((k) => /height|elev|stack|level|floor/i.test(k))
+      .filter((k) => /height|elev|stack|level|floor|baseFrom/i.test(k))
       .sort()
       .map((k) => `${escapeHtml(k)}: ${escapeHtml(String(p[k]))}`)
       .join('<br>');
