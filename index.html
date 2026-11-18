@@ -642,6 +642,14 @@ main {
           Entra como primeira linha do label. Sozinho, sem propriedades marcadas,
           gera um label só de texto — vinculado ao elemento como os demais.
         </p>
+        <div class="btn-row mt-8">
+          <button id="btnFreeLoad" class="btn-outlined" title="Traz para o campo o texto livre do label selecionado no mapa" aria-label="Carregar texto do label selecionado">
+            Carregar do Selecionado
+          </button>
+          <button id="btnFreeApply" class="btn-outlined" title="Grava o texto do campo nos labels selecionados no mapa" aria-label="Aplicar texto aos labels selecionados">
+            Aplicar ao Selecionado
+          </button>
+        </div>
       </div>
 
       <hr class="kv-divider" />
@@ -909,7 +917,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V65 · © 2026 Königsberger Vannucchi
+  Beta V66 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -1573,6 +1581,13 @@ function callFmt(v) {
 }
 
 // Linhas do label: texto livre primeiro, depois "Propriedade: valor"
+function labelFreeText(pt) {
+  const p = pt?.properties || {};
+  if (typeof p.kv_freeText === 'string') return p.kv_freeText;
+  if (typeof p.sp_freeText === 'string') return p.sp_freeText;
+  return '';
+}
+
 function calloutLines(freeText, values) {
   const lines = [];
   if (freeText && String(freeText).trim()) lines.push(String(freeText).trim());
@@ -1711,7 +1726,7 @@ async function applyCalloutLabels(features, propKeys, freeText) {
         sp_source: f.properties?.id || f.id || null,
         sp_srcAnchor: c,
         sp_props: propKeys,
-        ...(freeText ? { sp_freeText: freeText } : {}),
+        ...(freeText ? { sp_freeText: freeText, kv_freeText: freeText } : {}),
         sp_callText: lines.join('\n'),
         sp_callVer: CALL_VERSION,
         sp_scaleBase: base,
@@ -2780,7 +2795,9 @@ async function updatePoints(auto = false, scope = 'all') {
     // Ramo próprio, antes do label de caixa — que fica intocado.
     if (pt.properties.sp_kind === 'callout') {
       const valuesC = await resolveProps(src, propKeys);
-      const freeC = typeof pt.properties.sp_freeText === 'string' ? pt.properties.sp_freeText : '';
+      // kv_freeText é a fonte da verdade: editá-lo no painel nativo do
+      // Giraffe redesenha o label na próxima sincronização
+      const freeC = labelFreeText(pt);
       const linesC = calloutLines(freeC, valuesC);
       const textC = linesC.join('\n');
       const topElevC = srcIsEvaluated
@@ -2797,7 +2814,9 @@ async function updatePoints(auto = false, scope = 'all') {
 
       // Mesmo adiamento durante o desfazer usado nos outros ramos
       const keyC = pointKey(pt);
-      const sigC = sourceSignature(valuesC, topElevC, centroid(src));
+      // O texto livre entra na assinatura: editá-lo é mudança legítima,
+      // não pode ser confundido com desfazer e adiado
+      const sigC = sourceSignature({ ...valuesC, __free: freeC }, topElevC, centroid(src));
       if (auto && !forceSync && keyC && syncedSigs.get(keyC) === sigC) {
         deferred++;
         continue;
@@ -2851,11 +2870,11 @@ async function updatePoints(auto = false, scope = 'all') {
     // Recalcula os valores (com fallbacks de calculadas) a partir da origem
     const values = await resolveProps(src, propKeys);
     const { copiedProps } = templateFromValues(values);
-    // Texto livre do label de caixa: mantém a linha no conjunto de chaves,
-    // para a reconstrução do texto nunca descartá-la
-    if (typeof pt.properties.sp_freeText === 'string' && pt.properties.sp_freeText) {
-      copiedProps.kv_freeText = pt.properties.sp_freeText;
-    }
+    // Texto livre do label de caixa: lido do PRÓPRIO label (kv_freeText),
+    // então uma edição feita no painel nativo é mantida, não sobrescrita.
+    // Vazio = sem linha de texto livre (a reconstrução a remove).
+    const freeB = labelFreeText(pt);
+    if (freeB.trim()) copiedProps.kv_freeText = freeB;
 
     // Elevação: o ponto acompanha o topo atual do elemento (topHeight).
     // Se srcIsEvaluated, usa a cota avaliada; se não, preserva a existente
@@ -3472,6 +3491,121 @@ $('btnProbeTextClear').onclick = async () => {
     log(`Sonda removida (${ids.length} variante(s)).`);
   } catch (e) {
     log('Falha ao remover a sonda: ' + e.message, true);
+  } finally {
+    releaseSelfWriting();
+  }
+};
+
+
+/* =========================================================
+   EDITOR DE TEXTO LIVRE DOS LABELS
+   Funciona nos dois estilos. Seleciona-se o label no mapa:
+     Carregar → traz o kv_freeText dele para o campo;
+     Aplicar  → grava o texto do campo nos labels selecionados.
+   No label de caixa basta ajustar a linha do template; no com ponta o
+   texto está na imagem, então o sprite é redesenhado na hora, a partir
+   dos valores que o próprio label guarda (kv_*) — não depende de
+   reler a origem nem da sincronização automática estar ligada.
+   ========================================================= */
+const FREE_TPL = `{{get(properties, 'kv_freeText')}}`;
+
+function isEditableLabel(f) {
+  const p = f?.properties || {};
+  return p.sp_tag === SP_TAG && p.sp_kind !== 'nivel';   // caixa ou com ponta
+}
+
+// Valores que o próprio label carrega, para redesenhar sem reler a origem
+function labelOwnValues(pt) {
+  const p = pt.properties || {};
+  const out = {};
+  (Array.isArray(p.sp_props) ? p.sp_props : []).forEach((k) => {
+    const v = p['kv_' + k];
+    out[k] = (v === undefined) ? null : v;
+  });
+  return out;
+}
+
+// Coloca/retira a linha do texto livre no texto de um label de caixa
+function boxTextWithFree(text, free) {
+  const rest = String(text || '').split('\n').filter((l) => l && !l.includes('kv_freeText'));
+  return free ? [FREE_TPL, ...rest].join('\n') : rest.join('\n');
+}
+
+$('btnFreeLoad').onclick = async () => {
+  const feats = await readSelection();
+  const hit = feats.find(isEditableLabel);
+  if (!hit) {
+    log('Selecione no mapa um label criado por este app (caixa ou com ponta).', true);
+    return;
+  }
+  $('freeText').value = labelFreeText(hit);
+  saveUiState();
+  log(hit.properties.kv_freeText || hit.properties.sp_freeText
+    ? 'Texto do label carregado no campo — edite e use Aplicar ao Selecionado.'
+    : 'Este label ainda não tem texto livre — digite e use Aplicar ao Selecionado.');
+};
+
+$('btnFreeApply').onclick = async () => {
+  const free = ($('freeText').value || '').trim();
+  const feats = await readSelection();
+  const sel = new Set(feats.map((f) => f.id || f.properties?.id).filter(Boolean));
+  if (!sel.size) { log('Selecione no mapa os labels a editar.', true); return; }
+
+  // Lê o estado completo dos pontos no rawSections (a seleção pode vir parcial)
+  const labels = getRawSectionFeatures().filter(
+    (f) => isEditableLabel(f) && sel.has(f.id || f.properties?.id)
+  );
+  if (!labels.length) { log('A seleção não contém labels deste app.', true); return; }
+
+  const toUpdate = [];
+  let vazios = 0;
+  for (const pt of labels) {
+    const p = pt.properties;
+    const freeProps = { kv_freeText: free, sp_freeText: free };
+
+    if (p.sp_kind === 'callout') {
+      const lines = calloutLines(free, labelOwnValues(pt));
+      if (!lines.length) { vazios++; continue; }
+      let pc;
+      try { pc = await calloutPng(lines); } catch (e) { log(e.message, true); continue; }
+      const sc = resolveCalloutScale(pt, pc.maxDim);
+      toUpdate.push({
+        ...pt,
+        properties: {
+          ...p, ...freeProps,
+          sp_callText: lines.join('\n'),
+          sp_callVer: CALL_VERSION,
+          sp_scaleBase: sc.base,
+          sp_scaleApplied: sc.scale,
+          sp_spriteDim: pc.maxDim,
+          marker: {
+            ...p.marker,
+            value: { ...(p.marker?.value || {}), spriteUrl: pc.png, scale: sc.scale, anchor: 'bottom' },
+          },
+        },
+      });
+    } else {
+      const text = boxTextWithFree(p.marker?.value?.text, free);
+      if (!text.trim()) { vazios++; continue; }
+      toUpdate.push({
+        ...pt,
+        properties: {
+          ...p, ...freeProps,
+          marker: { ...p.marker, value: { ...(p.marker?.value || {}), text } },
+        },
+      });
+    }
+  }
+
+  if (vazios) log(`${vazios} label(s) ignorado(s) — ficariam sem nenhum conteúdo.`, true);
+  if (!toUpdate.length) return;
+
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('updateRawSections', [toUpdate]);
+    log(`Texto aplicado a ${toUpdate.length} label(s).`);
+  } catch (e) {
+    log('Falha ao aplicar o texto: ' + e.message, true);
   } finally {
     releaseSelfWriting();
   }
