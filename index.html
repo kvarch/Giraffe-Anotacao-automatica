@@ -635,6 +635,15 @@ main {
         <!-- checkboxes gerados via JS -->
       </div>
 
+      <div class="mt-8">
+        <label class="kv-label" for="freeText">Texto livre (opcional)</label>
+        <input type="text" id="freeText" class="kv-input" placeholder="Ex.: TORRE A" maxlength="80" />
+        <p class="kv-helper" style="margin-top:6px;margin-bottom:0">
+          Entra como primeira linha do label. Sozinho, sem propriedades marcadas,
+          gera um label só de texto — vinculado ao elemento como os demais.
+        </p>
+      </div>
+
       <hr class="kv-divider" />
 
       <!-- Rótulo de Nível: saída gráfica, mora junto das propriedades -->
@@ -689,6 +698,11 @@ main {
         <input type="checkbox" id="outLabel" />
         <span>Gerar Label (geometria de texto)</span>
       </label>
+      <div class="kv-radio-row" style="margin:0 0 4px 24px" role="radiogroup" aria-label="Estilo do label">
+        <span class="kv-label" style="margin-bottom:0">Estilo</span>
+        <label class="kv-radio-label"><input type="radio" name="labelStyle" value="box" checked /> Caixa</label>
+        <label class="kv-radio-label"><input type="radio" name="labelStyle" value="leader" /> Com ponta</label>
+      </div>
 
       <hr class="kv-divider" />
 
@@ -895,7 +909,7 @@ main {
 
 <!-- ===================== FOOTER ===================== -->
 <footer class="app-footer">
-  Beta V63 · © 2026 Königsberger Vannucchi
+  Beta V65 · © 2026 Königsberger Vannucchi
 </footer>
 
 <script type="module">
@@ -937,6 +951,8 @@ function saveUiState() {
     updateMode: document.querySelector('input[name="updMode"]:checked')?.value || 'original',
     infoOnlyFilled: $('infoOnlyFilled').checked,
     symMode: symbolModeSetting(),
+    labelStyle: labelStyleSetting(),
+    freeText: $('freeText').value,
   };
   localStorage.setItem(UI_STORE, JSON.stringify(state));
 }
@@ -967,6 +983,11 @@ function restoreUiState() {
     const radio = document.querySelector(`input[name="symMode"][value="${state.symMode}"]`);
     if (radio) radio.checked = true;
   }
+  if (state.labelStyle) {
+    const radio = document.querySelector(`input[name="labelStyle"][value="${state.labelStyle}"]`);
+    if (radio) radio.checked = true;
+  }
+  if (typeof state.freeText === 'string') $('freeText').value = state.freeText;
   // Layer é restaurado após populateLayerSelect (a opção precisa existir)
   window.__kvPendingLayer = state.layer || null;
   log('Estado da interface restaurado.');
@@ -1387,7 +1408,7 @@ function templateFromValues(values) {
   return { copiedProps, text: templateLines.join('\n') };
 }
 
-async function buildLabelFeatures(features, propKeys) {
+async function buildLabelFeatures(features, propKeys, freeText = '') {
   const out = [];
   const stamp = Date.now();
   const missingReport = [];
@@ -1399,7 +1420,15 @@ async function buildLabelFeatures(features, propKeys) {
     // Valores resolvidos (com fallbacks) copiados com prefixo kv_ —
     // evita colisão com chaves nativas (usage, height, levels).
     const values = await resolveProps(f, propKeys);
-    const { copiedProps, text } = templateFromValues(values);
+    const tv = templateFromValues(values);
+    const copiedProps = { ...tv.copiedProps };
+    let text = tv.text;
+    // Texto livre: primeira linha, também via template — assim a
+    // sincronização o reconhece como parte do conjunto e não o descarta
+    if (freeText) {
+      copiedProps.kv_freeText = freeText;
+      text = `{{get(properties, 'kv_freeText')}}` + (text ? '\n' + text : '');
+    }
     if (!text) {
       // Diagnóstico: dizer QUAIS propriedades não existem nesta geometria,
       // em vez de falhar silenciosamente com mensagem genérica.
@@ -1457,6 +1486,7 @@ async function buildLabelFeatures(features, propKeys) {
         sp_source: f.properties?.id || f.id || null,  // vínculo com a feature de origem
         sp_srcAnchor: c,                               // centróide da origem nesta sincronização
         sp_props: propKeys,                            // quais propriedades sincronizar
+        ...(freeText ? { sp_freeText: freeText } : {}),
         name: `kv_annot_${stamp}_${i + 1}`,            // único — não conflita com anteriores
       },
     });
@@ -1491,8 +1521,221 @@ async function deleteTaggedSections() {
   }
 }
 
-async function applyLabels(features, propKeys) {
-  const labelFeats = await buildLabelFeatures(features, propKeys);
+
+/* =========================================================
+   LABEL COM PONTA (linha de chamada)
+   Mesma simbologia da "linha de chamada" do KV Pranchas: seta na
+   ponta, trecho inclinado a 45°, prateleira horizontal e o texto
+   apoiado sobre ela.
+
+   O marcador de texto do Giraffe não desenha linhas, então o conjunto
+   inteiro vira um sprite PNG — a técnica já validada nos rótulos de
+   nível. O quadro recebe padding transparente à esquerda para que a
+   PONTA DA SETA fique no centro-inferior, onde a âncora 'bottom'
+   comprovadamente posiciona o ponto (mesma solução da v30).
+
+   O renderer normaliza o sprite pela maior dimensão; o scale é
+   compensado por ela, para o texto manter o tamanho dos rótulos de
+   nível independentemente do comprimento do texto ou do número de
+   linhas (mesma calibragem da v31).
+   ========================================================= */
+const CALL_FONT = 26;                        // = SYM_FONT dos rótulos de nível
+const CALL_LH = Math.round(CALL_FONT * 1.2);
+const CALL_BOX = '#000000';                  // caixa preenchida (referência do usuário)
+const CALL_INK = '#FFFFFF';                  // texto branco em negrito
+const CALL_PAD_X = 14, CALL_PAD_Y = 9;       // respiro do texto dentro da caixa
+const CALL_TAIL = 22;                        // tamanho da ponta, em px do sprite
+const CALL_VERSION = 'balao1';               // muda o desenho → regenera os existentes
+const CALL_REF_DIM = 147;                    // maior dimensão de referência (calibragem v29/v31)
+const callPngCache = new Map();
+let callMeasureCtx = null;
+
+function labelStyleSetting() {
+  return document.querySelector('input[name="labelStyle"]:checked')?.value || 'box';
+}
+
+function callMeasure(s) {
+  if (!callMeasureCtx) callMeasureCtx = document.createElement('canvas').getContext('2d');
+  callMeasureCtx.font = `bold ${CALL_FONT}px Arial, Helvetica, sans-serif`;
+  return Math.ceil(callMeasureCtx.measureText(s).width);
+}
+
+function callEsc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// Valor legível: inteiros sem casas, medidas com até 2 casas, vírgula decimal
+function callFmt(v) {
+  if (typeof v === 'number') {
+    return v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  }
+  return String(v);
+}
+
+// Linhas do label: texto livre primeiro, depois "Propriedade: valor"
+function calloutLines(freeText, values) {
+  const lines = [];
+  if (freeText && String(freeText).trim()) lines.push(String(freeText).trim());
+  Object.entries(values || {}).forEach(([k, v]) => {
+    if (v === null || v === undefined || v === '' || typeof v === 'boolean') return;
+    lines.push(`${PROP_PT[k] || k}: ${callFmt(v)}`);
+  });
+  return lines;
+}
+
+function calloutSvg(lines) {
+  // Caixa preta com texto branco em negrito; a ponta é um triângulo que
+  // prolonga a borda ESQUERDA da caixa para baixo — o vértice inferior
+  // esquerdo é o marcador, e é ele que tem de coincidir com o ponto.
+  const textW = Math.ceil(Math.max(10, ...lines.map(callMeasure)) * 1.04);
+  const boxW = textW + 2 * CALL_PAD_X;
+  const boxH = lines.length * CALL_LH + 2 * CALL_PAD_Y;
+  const bx0 = 1;                                 // meia folga de antialias
+  const H = boxH + CALL_TAIL;
+  const tipX = bx0, tipY = H;                    // vértice da ponta = base do quadro
+  const W0 = bx0 + boxW + 1;
+  const P = Math.max(0, W0 - 2 * tipX);          // padding: ponta no centro horizontal
+  const W = W0 + P;
+  const x = (v) => (v + P).toFixed(2);
+
+  // Caixa e ponta num só contorno, sem emenda visível
+  const shape =
+    `M${x(bx0)},0 L${x(bx0 + boxW)},0 L${x(bx0 + boxW)},${boxH} `
+    + `L${x(bx0 + CALL_TAIL)},${boxH} L${x(bx0)},${H} Z`;
+
+  const texts = lines.map((ln, i) => {
+    const yb = CALL_PAD_Y + i * CALL_LH + (CALL_LH - CALL_FONT) / 2 + CALL_FONT * 0.82;
+    return `<text x="${x(bx0 + CALL_PAD_X)}" y="${yb.toFixed(2)}" `
+      + `font-family="Arial, Helvetica, sans-serif" font-weight="bold" `
+      + `font-size="${CALL_FONT}" fill="${CALL_INK}">${callEsc(ln)}</text>`;
+  }).join('');
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`
+    + `<path d="${shape}" fill="${CALL_BOX}"/>`
+    + texts
+    + `</svg>`;
+  return { svg, W, H, tipX: tipX + P, tipY };
+}
+
+
+function calloutPng(lines) {
+  const key = lines.join('\n');
+  if (callPngCache.has(key)) return Promise.resolve(callPngCache.get(key));
+  return new Promise((resolve, reject) => {
+    const { svg, W, H } = calloutSvg(lines);
+    const img = new Image();
+    const RES = 3;
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = W * RES; c.height = H * RES;
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const out = { png: c.toDataURL('image/png'), maxDim: Math.max(W, H) };
+      callPngCache.set(key, out);
+      resolve(out);
+    };
+    img.onerror = () => reject(new Error('Falha ao rasterizar o label com ponta'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
+
+// Escala com preservação de ajuste manual (mesmo princípio da v32)
+function resolveCalloutScale(pt, maxDim) {
+  const p = pt.properties || {};
+  let base = p.sp_scaleBase;
+  const applied = p.sp_scaleApplied, cur = p.marker?.value?.scale, prevDim = p.sp_spriteDim;
+  if (typeof applied === 'number' && typeof cur === 'number' && isFinite(cur) && cur > 0
+      && Math.abs(cur - applied) > 1e-4 && typeof prevDim === 'number' && prevDim > 0) {
+    base = cur * CALL_REF_DIM / prevDim;   // você mudou o tamanho à mão: vira a nova base
+  }
+  if (!(typeof base === 'number' && isFinite(base) && base > 0)) {
+    base = ((parseFloat($('textSize').value) || 30) / 30) * 2.5;
+  }
+  return { base, scale: base * maxDim / CALL_REF_DIM };
+}
+
+async function applyCalloutLabels(features, propKeys, freeText) {
+  const out = [];
+  const stamp = Date.now();
+  const base = ((parseFloat($('textSize').value) || 30) / 30) * 2.5;
+
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
+    const c = centroid(f);
+    if (!c) continue;
+
+    const values = await resolveProps(f, propKeys);
+    const lines = calloutLines(freeText, values);
+    if (!lines.length) {
+      log(`Label com ponta não criado — ${f.geometry?.type || 'feature'} ${i + 1}: nenhuma propriedade com valor e sem texto livre.`, true);
+      continue;
+    }
+    const topElev = (await resolveProps(f, ['alturaDoTopo'])).alturaDoTopo || 0;
+
+    let pc;
+    try { pc = await calloutPng(lines); } catch (e) { log(e.message, true); continue; }
+    const scale = base * pc.maxDim / CALL_REF_DIM;
+    const { copiedProps } = templateFromValues(values);
+
+    out.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: c },
+      properties: {
+        ...copiedProps,
+        type: 'genericPoint',
+        usage: 'Pin',
+        radius: 0.1,
+        layerId: $('layerSelect').value || 'default',
+        public: true,
+        stackOrder: 0,
+        _visible: true,
+        baseHeight: topElev,
+        _baseHeight: topElev,
+        _height: 0,
+        _baseElevation: 0,
+        marker: {
+          kind: 'icon',
+          value: {
+            spriteUrl: pc.png,
+            spriteSize: 64,
+            scale,
+            onTop: true,
+            stick: false,
+            stickHeight: 0,
+            anchor: 'bottom',          // ponta da seta no centro-inferior do quadro
+            renderMode: 'screen',
+          },
+        },
+        sp_tag: SP_TAG,
+        sp_kind: 'callout',
+        sp_source: f.properties?.id || f.id || null,
+        sp_srcAnchor: c,
+        sp_props: propKeys,
+        ...(freeText ? { sp_freeText: freeText } : {}),
+        sp_callText: lines.join('\n'),
+        sp_callVer: CALL_VERSION,
+        sp_scaleBase: base,
+        sp_scaleApplied: scale,
+        sp_spriteDim: pc.maxDim,
+        name: `kv_call_${stamp}_${i + 1}`,
+      },
+    });
+  }
+
+  if (!out.length) return;
+  try {
+    isSelfWriting = true;
+    await rpc.invoke('createRawSections', [out]);
+    log(`${out.length} label(s) com ponta criado(s).`);
+  } catch (e) {
+    log('createRawSections (label com ponta) falhou: ' + e.message, true);
+  } finally {
+    releaseSelfWriting();
+  }
+}
+
+async function applyLabels(features, propKeys, freeText = '') {
+  const labelFeats = await buildLabelFeatures(features, propKeys, freeText);
   if (!labelFeats.length) {
     log('Nenhum label a criar (sem propriedades válidas).');
     return;
@@ -2180,25 +2423,28 @@ $('btnApply').onclick = async () => {
   const wantNivel = $('outNivel').checked;
   if (!wantPopup && !wantLabel && !wantNivel) { log('Selecione ao menos um tipo de saída.', true); return; }
 
-  // O Rótulo de Nível não depende das propriedades de texto — ele usa o
-  // Nível do Topo. Só popup e label exigem propriedades marcadas.
-  const needsProps = wantPopup || wantLabel;
-  if (needsProps && !propKeys.length) {
-    if (wantNivel) {
-      log('Sem propriedades marcadas — gerando apenas o Rótulo de Nível (popup e label exigem ao menos uma propriedade).');
-    } else {
-      log('Selecione ao menos uma propriedade, ou marque o Rótulo de Nível.', true);
-      return;
-    }
+  // Rótulo de Nível usa o Nível do Topo; o popup exige propriedades; o
+  // label aceita propriedades OU texto livre (ou os dois).
+  const freeText = ($('freeText').value || '').trim();
+  const canPopup = wantPopup && propKeys.length > 0;
+  const canLabel = wantLabel && (propKeys.length > 0 || !!freeText);
+  if (!canPopup && !canLabel && !wantNivel) {
+    log('Marque ao menos uma propriedade, preencha o Texto livre, ou marque o Rótulo de Nível.', true);
+    return;
   }
+  if (wantPopup && !canPopup) log('Popup pulado — ele exige ao menos uma propriedade marcada.');
+  if (wantLabel && !canLabel) log('Label pulado — marque uma propriedade ou preencha o Texto livre.');
 
   const feats = await readSelection();
   updateSelStatus(feats);
   if (!feats.length) { log('Nenhuma geometria selecionada no mapa.', true); return; }
 
   log(`Processando ${feats.length} feature(s)...`);
-  if (wantPopup && propKeys.length) await applyPopups(feats, propKeys);
-  if (wantLabel && propKeys.length) await applyLabels(feats, propKeys);
+  if (canPopup) await applyPopups(feats, propKeys);
+  if (canLabel) {
+    if (labelStyleSetting() === 'leader') await applyCalloutLabels(feats, propKeys, freeText);
+    else await applyLabels(feats, propKeys, freeText);
+  }
   if (wantNivel) await applyNivelLabels(feats);
 };
 
@@ -2530,9 +2776,86 @@ async function updatePoints(auto = false, scope = 'all') {
       continue;
     }
 
+    // ─── LABEL COM PONTA: o texto está no sprite, então regenera ao mudar ───
+    // Ramo próprio, antes do label de caixa — que fica intocado.
+    if (pt.properties.sp_kind === 'callout') {
+      const valuesC = await resolveProps(src, propKeys);
+      const freeC = typeof pt.properties.sp_freeText === 'string' ? pt.properties.sp_freeText : '';
+      const linesC = calloutLines(freeC, valuesC);
+      const textC = linesC.join('\n');
+      const topElevC = srcIsEvaluated
+        ? ((await resolveProps(src, ['alturaDoTopo'])).alturaDoTopo || 0)
+        : pt.properties.baseHeight;  // preserva cota quando não avaliado
+      // Texto mudou, ou o rótulo foi desenhado num estilo anterior
+      const textChangedC = !!linesC.length
+        && (textC !== pt.properties.sp_callText || pt.properties.sp_callVer !== CALL_VERSION);
+      const elevChangedC =
+        pt.properties.baseHeight !== topElevC || pt.properties._baseHeight !== topElevC;
+      const followC = followSource(pt, src);
+
+      if (!textChangedC && !elevChangedC && !followC.geomChanged && !followC.anchorChanged) continue;
+
+      // Mesmo adiamento durante o desfazer usado nos outros ramos
+      const keyC = pointKey(pt);
+      const sigC = sourceSignature(valuesC, topElevC, centroid(src));
+      if (auto && !forceSync && keyC && syncedSigs.get(keyC) === sigC) {
+        deferred++;
+        continue;
+      }
+      if (keyC) syncedSigs.set(keyC, sigC);
+
+      // Só rasteriza de novo se o texto mudou; posição/cota reaproveitam o sprite
+      let spriteC = pt.properties.marker?.value?.spriteUrl;
+      let dimC = pt.properties.sp_spriteDim;
+      if (textChangedC) {
+        try {
+          const pc = await calloutPng(linesC);
+          spriteC = pc.png;
+          dimC = pc.maxDim;
+        } catch (e) {
+          log('Rasterização do label com ponta falhou no update: ' + e.message, true);
+          continue;
+        }
+      }
+      const scC = resolveCalloutScale(pt, dimC || CALL_REF_DIM);
+      const { copiedProps: cpC } = templateFromValues(valuesC);
+
+      toUpdate.push({
+        ...pt,
+        geometry: followC.geometry,
+        properties: {
+          ...pt.properties,
+          ...cpC,
+          baseHeight: topElevC,
+          _baseHeight: topElevC,
+          sp_srcAnchor: followC.anchor,
+          ...(textChangedC ? { sp_callText: textC, sp_callVer: CALL_VERSION } : {}),
+          sp_scaleBase: scC.base,
+          sp_scaleApplied: scC.scale,
+          sp_spriteDim: dimC,
+          ...(useAppProps ? { sp_props: propKeys } : {}),
+          marker: {
+            ...pt.properties.marker,
+            value: {
+              ...(pt.properties.marker?.value || {}),
+              spriteUrl: spriteC,
+              scale: scC.scale,
+              anchor: 'bottom',
+            },
+          },
+        },
+      });
+      continue;
+    }
+
     // Recalcula os valores (com fallbacks de calculadas) a partir da origem
     const values = await resolveProps(src, propKeys);
     const { copiedProps } = templateFromValues(values);
+    // Texto livre do label de caixa: mantém a linha no conjunto de chaves,
+    // para a reconstrução do texto nunca descartá-la
+    if (typeof pt.properties.sp_freeText === 'string' && pt.properties.sp_freeText) {
+      copiedProps.kv_freeText = pt.properties.sp_freeText;
+    }
 
     // Elevação: o ponto acompanha o topo atual do elemento (topHeight).
     // Se srcIsEvaluated, usa a cota avaliada; se não, preserva a existente
@@ -2584,7 +2907,9 @@ async function updatePoints(auto = false, scope = 'all') {
       );
       const newLines = [...requiredKeys]
         .filter((k) => !presentKeys.has(k))
-        .map((k) => `${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`);
+        .map((k) => (k === 'freeText'
+          ? `{{get(properties, 'kv_freeText')}}`
+          : `${PROP_PT[k] || k}: {{get(properties, 'kv_${k}')}}`));
       newText = [...keptLines, ...newLines].join('\n');
     }
 
